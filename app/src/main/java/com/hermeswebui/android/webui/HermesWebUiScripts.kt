@@ -1322,6 +1322,21 @@ object HermesWebUiScripts {
               var permission = normalizePermission(initialPermission);
               var pending = {};
               var nextId = 1;
+              // The official Webapp's own session notifications duplicate Android's gateway alerts,
+              // so they are kept here unposted; a native alert tap runs the kept instance's onclick.
+              var pageNotifications = Object.create(null);
+              var pageNotificationLimit = 32;
+
+              var keepsPageNotification = function(tag) {
+                return window.__HERMES_UI_SURFACE__ === 'webapp' && tag.indexOf('hermes:') === 0;
+              };
+
+              var keepPageNotification = function(notification) {
+                delete pageNotifications[notification.tag];
+                pageNotifications[notification.tag] = notification;
+                var tags = Object.keys(pageNotifications);
+                if (tags.length > pageNotificationLimit) delete pageNotifications[tags[0]];
+              };
 
               var makeDomException = function(message, name) {
                 try { return new DOMException(message, name); } catch (_) {
@@ -1414,6 +1429,11 @@ object HermesWebUiScripts {
                 this.onerror = null;
                 this.onclose = null;
 
+                if (keepsPageNotification(this.tag)) {
+                  keepPageNotification(this);
+                  return;
+                }
+
                 var notification = this;
                 showNativeNotification(this.title, options)
                   .then(function() {
@@ -1425,6 +1445,7 @@ object HermesWebUiScripts {
               }
 
               HermesAndroidNotification.prototype.close = function() {
+                if (pageNotifications[this.tag] === this) delete pageNotifications[this.tag];
                 if (typeof this.onclose === 'function') this.onclose(safeEvent('close'));
               };
 

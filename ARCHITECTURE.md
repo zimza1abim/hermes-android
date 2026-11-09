@@ -225,6 +225,13 @@ Android keeps the WebView alive instead of relaying the socket.
   redacted public version, and an open-app intent that never loads a URL.
   Allow/Deny are immutable broadcasts to a receiver registered not-exported
   for the activity's lifetime; Allow requires device unlock on Android 12+.
+- The shared notification facade (`HermesWebUiScripts.buildNotificationBridgeScript`)
+  does not post a page notification whose tag starts with `hermes:` while
+  `window.__HERMES_UI_SURFACE__ === 'webapp'` (read when the notification is
+  created): the official Webapp tags its own session notifications that way,
+  and they duplicate the gateway alerts above. It keeps each such instance,
+  with its `onclick`, in a per-document registry keyed by tag (newest 32;
+  `close()` removes it). Hermes WebUI notifications are unchanged.
 - `background/HermesKeepAliveService` is a `specialUse` foreground service
   (manifest subtype property) with a minimum-importance notification. Unlike
   `dataSync` it has no Android 15+ daily run-time limit, so it has no

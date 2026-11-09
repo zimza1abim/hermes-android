@@ -78,6 +78,21 @@ class HermesWebUiScriptsTest {
     }
 
     @Test
+    fun `notification facade keeps official Webapp session notifications instead of posting them`() {
+        val script = HermesWebUiScripts.buildNotificationBridgeScript("HermesAndroidNotifications", "granted")
+
+        assertThat(script).contains(
+            "return window.__HERMES_UI_SURFACE__ === 'webapp' && tag.indexOf('hermes:') === 0;"
+        )
+        val kept = script.indexOf("if (keepsPageNotification(this.tag)) {")
+        assertThat(kept).isGreaterThan(script.indexOf("this.onclose = null;"))
+        assertThat(script.indexOf("keepPageNotification(this);\n      return;", kept)).isGreaterThan(kept)
+        assertThat(script.indexOf("showNativeNotification(this.title, options)")).isGreaterThan(kept)
+        assertThat(script).contains("if (pageNotifications[this.tag] === this) delete pageNotifications[this.tag];")
+        assertThat(script).contains("if (tags.length > pageNotificationLimit) delete pageNotifications[tags[0]];")
+    }
+
+    @Test
     fun `viewport fix script injects CSS custom properties for viewport dimensions`() {
         val script = HermesWebUiScripts.viewportFixScript
 
