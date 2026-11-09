@@ -387,6 +387,7 @@ class MainActivity : ComponentActivity() {
             activity = this,
             bridgeName = HermesWebappGatewayBridgeName,
             isTrustedSource = ::isTrustedNotificationBridgeSource,
+            trustedPageOrigin = { UrlOrigins.pageOrigin(viewModel.uiState.value.settings.serverUrl) },
             initialSettings = settingsRepository.getWebappBackgroundSettings()
         )
         appUpdateCoordinator = HermesAppUpdateCoordinator(

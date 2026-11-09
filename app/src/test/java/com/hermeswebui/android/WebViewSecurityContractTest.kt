@@ -186,6 +186,17 @@ class WebViewSecurityContractTest {
     }
 
     @Test
+    fun `webapp page scripts are origin guarded and the network callback is released with keep-alive`() {
+        val coordinator = codeOnly.entries.single { it.key.endsWith("webapp/WebappGatewayCoordinator.kt") }.value
+        val evaluations = Regex("""evaluateJavascript\(""").findAll(coordinator).count()
+        val guarded = Regex("""evaluateJavascript\(\s*HermesWebUiScripts\.buildOriginGuardedRuntimeScript\(""").findAll(coordinator).count()
+        assertThat(evaluations).isAtLeast(1)
+        assertThat(guarded).isEqualTo(evaluations)
+        val stop = coordinator.substringAfter("private fun stopKeepAliveService()").substringBefore("private fun ")
+        assertThat(stop).contains("unregisterNetworkCallback(")
+    }
+
+    @Test
     fun `webapp tray answers stay private and Allow requires an unlocked device`() {
         val coordinator = codeOnly.entries.single { it.key.endsWith("webapp/WebappGatewayCoordinator.kt") }.value
         assertThat(coordinator).contains("ContextCompat.RECEIVER_NOT_EXPORTED")

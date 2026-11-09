@@ -1658,6 +1658,15 @@ object HermesWebUiScripts {
     }
 
     /**
+     * Sent when the default network changes while the official Webapp is hidden. The Webapp's own
+     * `online` handler redials its gateway socket at once; Android cannot see whether the old socket
+     * survived, and a hidden page's throttled timers would otherwise delay the redial.
+     */
+    val webappOnlineNudgeScript = """
+        window.dispatchEvent(new Event('online'));
+    """.trimIndent()
+
+    /**
      * Official Webapp gateway tap. Wraps `window.WebSocket` so sockets the page opens to its own
      * origin's `/api/ws` report watched inbound frames, page responses and closes to
      * [bridgeName]. Native parses everything (`webapp/GatewayProtocol`); this script only filters

@@ -9,6 +9,8 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -26,14 +28,15 @@ import com.hermeswebui.android.webui.HermesWebUiScripts
 import org.json.JSONObject
 
 /**
- * The official Webapp in the background: keep-alive, renderer priority, gateway alerts and tray
- * answers. MainActivity feeds it visibility, document starts, settings and intents; every decision
- * comes from [WebappAlertReducer], and this class only renders its effects.
+ * The official Webapp in the background: keep-alive, renderer priority, network-change nudges,
+ * gateway alerts and tray answers. MainActivity feeds it visibility, document starts, settings and
+ * intents; every decision comes from [WebappAlertReducer], and this class only renders its effects.
  */
 class WebappGatewayCoordinator(
     private val activity: ComponentActivity,
     private val bridgeName: String,
     private val isTrustedSource: (Uri, Boolean) -> Boolean,
+    private val trustedPageOrigin: () -> String?,
     initialSettings: WebappBackgroundSettings,
 ) {
     /** Document-start and runtime tap script, built from the parser's own marker list. */
@@ -52,6 +55,8 @@ class WebappGatewayCoordinator(
     private val handler = Handler(Looper.getMainLooper())
     private var keepAliveRunning = false
     private val deferredStop = Runnable { stopKeepAliveService() }
+    private val connectivity: ConnectivityManager? = activity.getSystemService(ConnectivityManager::class.java)
+    private var networkWatch: NetworkWatch? = null
 
     private val answerReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -162,6 +167,7 @@ class WebappGatewayCoordinator(
         handler.removeCallbacks(deferredStop)
         if (on) {
             if (!keepAliveRunning) keepAliveRunning = HermesKeepAliveService.start(activity)
+            watchNetwork()
         } else if (state.visible) {
             stopKeepAliveService()
         } else {
@@ -181,6 +187,54 @@ class WebappGatewayCoordinator(
     private fun stopKeepAliveService() {
         keepAliveRunning = false
         HermesKeepAliveService.stop(activity)
+        networkWatch?.let { watch ->
+            watch.cancel()
+            runCatching { connectivity?.unregisterNetworkCallback(watch) }
+        }
+        networkWatch = null
+    }
+
+    private fun watchNetwork() {
+        if (networkWatch != null) return
+        val manager = connectivity ?: return
+        val watch = NetworkWatch(manager.activeNetwork)
+        if (runCatching { manager.registerDefaultNetworkCallback(watch, handler) }.isSuccess) networkWatch = watch
+    }
+
+    /** Tells a live gateway document that the network changed, so it redials now instead of after its throttled timers. */
+    private fun nudgeOnline() {
+        val view = webView ?: return
+        if (state.doc == null) return
+        val origin = trustedPageOrigin() ?: return
+        view.evaluateJavascript(
+            HermesWebUiScripts.buildOriginGuardedRuntimeScript(origin, HermesWebUiScripts.webappOnlineNudgeScript),
+            null
+        )
+    }
+
+    /** Default-network callback, live only while keep-alive runs. Callbacks arrive on [handler]. */
+    private inner class NetworkWatch(initial: Network?) : ConnectivityManager.NetworkCallback() {
+        private val identity = NetworkIdentity(initial)
+        private var latest: Network? = initial
+        private val settle = Runnable { if (identity.settle(latest)) nudgeOnline() }
+
+        override fun onAvailable(network: Network) {
+            latest = network
+            debounce()
+        }
+
+        override fun onLost(network: Network) {
+            if (network != latest) return
+            latest = null
+            debounce()
+        }
+
+        fun cancel() = handler.removeCallbacks(settle)
+
+        private fun debounce() {
+            handler.removeCallbacks(settle)
+            handler.postDelayed(settle, NETWORK_SETTLE_MS)
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -241,6 +295,7 @@ class WebappGatewayCoordinator(
         private const val EXTRA_PROMPT = "com.hermeswebui.android.extra.WEBAPP_PROMPT"
         private const val EXTRA_DECISION = "com.hermeswebui.android.extra.WEBAPP_DECISION"
         private const val KEEP_ALIVE_STOP_GRACE_MS = 15_000L
+        private const val NETWORK_SETTLE_MS = 1_000L
 
         /** One channel per [GatewayAlertKind] plus the keep-alive channel, grouped as "Hermes Agent". */
         fun createChannels(context: Context) {

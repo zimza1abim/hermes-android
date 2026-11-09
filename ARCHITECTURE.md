@@ -226,6 +226,13 @@ Android keeps the WebView alive instead of relaying the socket.
   (manifest subtype property) with a minimum-importance notification. Unlike
   `dataSync` it has no Android 15+ daily run-time limit, so it has no
   `onTimeout` path. The WebUI reconnect service stays `dataSync`.
+- While keep-alive runs, the coordinator alone holds a default-network
+  callback (registered on keep-alive on, unregistered in the same stop path as
+  the service). Changes settle for 1 s; `webapp/NetworkIdentity` reports a
+  change only when a different non-null network became the default. Then a
+  live gateway document gets an origin-guarded
+  `window.dispatchEvent(new Event('online'))`, whose official handler redials
+  at once instead of waiting on a hidden page's throttled timers.
 - Battery optimization is Android-owned state. `MainActivity` reads
   `PowerManager.isIgnoringBatteryOptimizations` into a Compose snapshot on
   every resume and the Notifications section shows it. Only a tap on that row
