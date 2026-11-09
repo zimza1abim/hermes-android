@@ -345,6 +345,17 @@ class HermesWebUiScriptsTest {
     }
 
     @Test
+    fun `gateway tap tells the page that Android keeps its socket alive, once installed`() {
+        val script = HermesWebUiScripts.buildWebappGatewayTapScript("HermesAndroidGateway", GatewayProtocol.WATCHED_MARKERS)
+        val installed = script.indexOf("window.__hermesAndroidGatewayTapInstalled = true;")
+        val hint = script.indexOf("window.__hermesAndroidKeepsSocketAlive = true;")
+
+        assertThat(installed).isAtLeast(0)
+        assertThat(hint).isGreaterThan(installed)
+        assertThat(Regex("""__hermesAndroidKeepsSocketAlive""").findAll(script).count()).isEqualTo(1)
+    }
+
+    @Test
     fun `gateway tap checks the webapp surface when frames arrive, not at install`() {
         val script = HermesWebUiScripts.buildWebappGatewayTapScript("HermesAndroidGateway", GatewayProtocol.WATCHED_MARKERS)
         val surfaceReads = Regex("""__HERMES_UI_SURFACE__""").findAll(script).count()

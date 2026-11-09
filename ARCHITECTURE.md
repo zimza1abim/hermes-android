@@ -203,6 +203,9 @@ Android keeps the WebView alive instead of relaying the socket.
   page responses and closes to the `HermesAndroidGateway` WebMessageListener,
   tagged with a random per-document id announced first in a `hello` message.
   Native can only ask it to send a frame on a socket of that same document.
+  Once installed it sets `window.__hermesAndroidKeepsSocketAlive = true`, so
+  the Webapp's wake logic can probe its socket instead of assuming a socket
+  hidden for over 25 s is dead (the server-side reader is separate work).
 - `webapp/GatewayProtocol` is the only code that knows the JSON-RPC shapes
   (`message.complete`, `approval`, `clarify`, `approval.cancelled`,
   `background.complete`, `session.title`) and encodes approval answers.

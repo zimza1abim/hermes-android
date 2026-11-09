@@ -1672,7 +1672,9 @@ object HermesWebUiScripts {
      * [bridgeName]. Native parses everything (`webapp/GatewayProtocol`); this script only filters
      * by [markers], so it holds no protocol knowledge. The page surface is checked per frame because
      * `__HERMES_UI_SURFACE__` is set after document start. Native may ask it to send a frame only on
-     * a socket of this same document, through the captured native `send`.
+     * a socket of this same document, through the captured native `send`. Once installed it sets
+     * `window.__hermesAndroidKeepsSocketAlive`, so the Webapp's wake logic probes its socket instead
+     * of assuming a socket hidden for over 25 s is dead.
      */
     fun buildWebappGatewayTapScript(bridgeName: String, markers: List<String>): String {
         val quotedBridgeName = JSONObject.quote(bridgeName)
@@ -1686,6 +1688,7 @@ object HermesWebUiScripts {
               if (!bridge || typeof bridge.postMessage !== 'function' ||
                   typeof NativeWS !== 'function' || typeof NativeURL !== 'function') return;
               window.__hermesAndroidGatewayTapInstalled = true;
+              window.__hermesAndroidKeepsSocketAlive = true;
 
               var nativeSend = NativeWS.prototype.send;
               var markers = $markersJson;
