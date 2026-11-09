@@ -24,6 +24,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.RemoteInput
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.drawable.toBitmap
 import androidx.webkit.JavaScriptReplyProxy
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
@@ -65,7 +66,10 @@ class WebappGatewayCoordinator(
     private var networkWatch: NetworkWatch? = null
     /** Alerts posted (or cancelled, as null) during the current dispatch, by notification id. */
     private val trayChanges = mutableMapOf<Int, ShownAlert?>()
-    private val groupSweep = Runnable { refreshGroups(emptyMap()) }
+    private val largeIcon by lazy {
+        val size = activity.resources.getDimensionPixelSize(android.R.dimen.notification_large_icon_width)
+        ContextCompat.getDrawable(activity, R.drawable.hermes_agent_icon)?.toBitmap(size, size)
+    }
     private val monitor = GatewayMonitorLink(handler, ::dispatch)
 
     private val answerReceiver = object : BroadcastReceiver() {
@@ -107,11 +111,8 @@ class WebappGatewayCoordinator(
 
     fun onVisibilityChanged(visible: Boolean) {
         dispatch(WebappInput.Visibility(visible))
-        // A tapped or swiped alert leaves the tray without telling the app; drop a summary left empty.
-        if (visible) {
-            handler.removeCallbacks(groupSweep)
-            handler.postDelayed(groupSweep, GROUP_SWEEP_DELAY_MS)
-        }
+        // The app on screen shows everything the tray says, and a summary can outlive the tapped child.
+        if (visible) clearTray()
     }
 
     /** The main frame started a new document; the old one and its sockets are gone. */
@@ -141,7 +142,6 @@ class WebappGatewayCoordinator(
     fun dispose() {
         onDocumentStarted()
         handler.removeCallbacks(deferredStop)
-        handler.removeCallbacks(groupSweep)
         stopKeepAliveService()
         monitor.stop()
         if (receiverRegistered) runCatching { activity.unregisterReceiver(answerReceiver) }
@@ -302,6 +302,13 @@ class WebappGatewayCoordinator(
         }
     }
 
+    private fun clearTray() {
+        val manager = NotificationManagerCompat.from(activity)
+        runCatching { activity.getSystemService(NotificationManager::class.java)?.activeNotifications }.getOrNull()
+            ?.filter { it.tag == GatewayAlertKind.ALERT_TAG || it.tag == SUMMARY_TAG }
+            ?.forEach { manager.cancel(it.tag, it.id) }
+    }
+
     @SuppressLint("MissingPermission")
     private fun notify(alert: Alert, update: Boolean) {
         if (!HermesKeepAliveService.canPostNotifications(activity)) return
@@ -317,6 +324,7 @@ class WebappGatewayCoordinator(
         val builder = NotificationCompat.Builder(activity, alert.kind.channelId)
             .setSmallIcon(R.drawable.ic_notification)
             .setColor(ContextCompat.getColor(activity, R.color.brand_sky))
+            .setLargeIcon(largeIcon)
             .setContentTitle(title)
             .setSubText(reason)
             .setOnlyAlertOnce(update)
@@ -411,6 +419,7 @@ class WebappGatewayCoordinator(
         val notification = NotificationCompat.Builder(activity, summary.channelId)
             .setSmallIcon(R.drawable.ic_notification)
             .setColor(ContextCompat.getColor(activity, R.color.brand_sky))
+            .setLargeIcon(largeIcon)
             .setContentTitle(summary.title)
             .setContentText(text)
             .setStyle(style)
@@ -473,7 +482,6 @@ class WebappGatewayCoordinator(
         private const val KEEP_ALIVE_STOP_GRACE_MS = 15_000L
         private const val NETWORK_SETTLE_MS = 1_000L
         private const val MAX_SESSION_ID = 256
-        private const val GROUP_SWEEP_DELAY_MS = 1_000L
         private const val SUMMARY_TAG = "hermes.webapp.summary"
 
         private fun StatusBarNotification.toShownAlert(): ShownAlert? {
