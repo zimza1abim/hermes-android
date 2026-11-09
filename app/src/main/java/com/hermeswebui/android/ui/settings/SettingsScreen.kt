@@ -81,6 +81,7 @@ import com.hermeswebui.android.data.ServerProfile
 import com.hermeswebui.android.data.ServerType
 import com.hermeswebui.android.launcher.LauncherIcon
 import com.hermeswebui.android.ui.ServerValidationUiState
+import com.hermeswebui.android.webapp.WebappBackgroundSettings
 import kotlin.math.roundToInt
 
 private const val DefaultTailscalePackage = "com.tailscale.ipn"
@@ -114,6 +115,7 @@ fun SettingsScreen(
     appUpdateReleaseNotes: String?,
     clientCertificateUri: String?,
     clientCertificatePassword: String?,
+    webappBackground: WebappBackgroundSettings,
     serverValidation: ServerValidationUiState,
     appVersionLabel: String,
     serverProfiles: List<ServerProfile>,
@@ -129,6 +131,8 @@ fun SettingsScreen(
     onCheckSseSupport: () -> Unit,
     onCopySsePrompt: () -> Unit,
     onSetBlockScreenshotsEnabled: (Boolean) -> Unit,
+    onSetWebappBackground: (WebappBackgroundSettings) -> Unit,
+    onOpenNotificationChannel: (String?) -> Unit,
     onSetAppUpdateAlertsEnabled: (Boolean) -> Unit,
     onSetAutomaticAppUpdateChecksEnabled: (Boolean) -> Unit,
     onSetClientCertificateConfig: (String?, String?) -> Unit,
@@ -146,7 +150,7 @@ fun SettingsScreen(
     onReconnectCurrentServer: () -> Unit,
     onClearServerValidation: () -> Unit,
     modifier: Modifier = Modifier,
-    launcherIcon: LauncherIcon = LauncherIcon.WEBUI,
+    launcherIcon: LauncherIcon = LauncherIcon.DEFAULT,
     onSetLauncherIcon: (LauncherIcon) -> Unit = {}
 ) {
     BackHandler(onBack = onDismiss)
@@ -872,6 +876,14 @@ fun SettingsScreen(
                         }
                     }
                 }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                WebappNotificationsSection(
+                    settings = webappBackground,
+                    onChange = onSetWebappBackground,
+                    onOpenChannel = onOpenNotificationChannel
+                )
 
                 Spacer(modifier = Modifier.height(16.dp))
 

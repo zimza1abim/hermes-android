@@ -3,6 +3,7 @@ package com.hermeswebui.android.ui.settings
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
@@ -11,6 +12,8 @@ import androidx.compose.ui.test.longClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.google.common.truth.Truth.assertThat
 import com.hermeswebui.android.ui.ServerValidationUiState
+import com.hermeswebui.android.webapp.GatewayAlertKind
+import com.hermeswebui.android.webapp.WebappBackgroundSettings
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -45,6 +48,7 @@ class SettingsScreenTest {
                 appUpdateReleaseNotes = null,
                 clientCertificateUri = null,
                 clientCertificatePassword = null,
+                webappBackground = WebappBackgroundSettings(),
                 serverValidation = ServerValidationUiState(
                     isChecking = false,
                     message = "This Hermes server is still in initial setup.",
@@ -63,6 +67,8 @@ class SettingsScreenTest {
                 onCheckSseSupport = {},
                 onCopySsePrompt = {},
                 onSetBlockScreenshotsEnabled = {},
+                onSetWebappBackground = {},
+                onOpenNotificationChannel = {},
                 onSetAppUpdateAlertsEnabled = {},
                 onSetAutomaticAppUpdateChecksEnabled = {},
                 onSetClientCertificateConfig = { _, _ -> },
@@ -112,6 +118,7 @@ class SettingsScreenTest {
                 appUpdateReleaseNotes = null,
                 clientCertificateUri = null,
                 clientCertificatePassword = null,
+                webappBackground = WebappBackgroundSettings(),
                 serverValidation = ServerValidationUiState(
                     isChecking = true,
                     message = "Checking Hermes server readiness...",
@@ -130,6 +137,8 @@ class SettingsScreenTest {
                 onCheckSseSupport = {},
                 onCopySsePrompt = {},
                 onSetBlockScreenshotsEnabled = {},
+                onSetWebappBackground = {},
+                onOpenNotificationChannel = {},
                 onSetAppUpdateAlertsEnabled = {},
                 onSetAutomaticAppUpdateChecksEnabled = {},
                 onSetClientCertificateConfig = { _, _ -> },
@@ -179,6 +188,7 @@ class SettingsScreenTest {
                 appUpdateReleaseNotes = null,
                 clientCertificateUri = null,
                 clientCertificatePassword = null,
+                webappBackground = WebappBackgroundSettings(),
                 serverValidation = ServerValidationUiState(),
                 appVersionLabel = "Version 0.0.0",
                 serverProfiles = emptyList(),
@@ -193,6 +203,8 @@ class SettingsScreenTest {
                 onCheckSseSupport = {},
                 onCopySsePrompt = {},
                 onSetBlockScreenshotsEnabled = {},
+                onSetWebappBackground = {},
+                onOpenNotificationChannel = {},
                 onSetAppUpdateAlertsEnabled = {},
                 onSetAutomaticAppUpdateChecksEnabled = {},
                 onSetClientCertificateConfig = { _, _ -> },
@@ -257,6 +269,7 @@ class SettingsScreenTest {
             "APPLICATION",
             "UPDATES",
             "CONNECTION",
+            "NOTIFICATIONS",
             "PRIVACY",
             "TROUBLESHOOTING",
             "ADVANCED",
@@ -331,12 +344,38 @@ class SettingsScreenTest {
         assertThat(opened).isEqualTo(1)
     }
 
+    @Test
+    fun webappNotifications_editTheSettingsValueAndOpenEachChannel() {
+        var saved: WebappBackgroundSettings? = null
+        val opened = mutableListOf<String?>()
+        renderConfiguredSettings(
+            seconds = 1,
+            onSetWebappBackground = { saved = it },
+            onOpenNotificationChannel = { opened += it }
+        )
+
+        composeTestRule.onNodeWithText("Stay connected in the background").performScrollTo().performClick()
+        assertThat(saved).isEqualTo(WebappBackgroundSettings(keepAlive = false))
+
+        composeTestRule.onNodeWithText(GatewayAlertKind.APPROVAL.label).performScrollTo().performClick()
+        assertThat(saved).isEqualTo(WebappBackgroundSettings(disabled = setOf(GatewayAlertKind.APPROVAL)))
+
+        composeTestRule.onNodeWithContentDescription("Sound and vibration for ${GatewayAlertKind.CLARIFY.label}")
+            .performScrollTo()
+            .performClick()
+        composeTestRule.onNodeWithText("Android notification settings").performScrollTo().performClick()
+        assertThat(opened).containsExactly(GatewayAlertKind.CLARIFY.channelId, null).inOrder()
+    }
+
     private fun renderConfiguredSettings(
         seconds: Int,
         clientCertificateUri: String? = null,
         clientCertificatePassword: String? = null,
         onSetClientCertificateConfig: (String?, String?) -> Unit = { _, _ -> },
-        onShowWelcome: () -> Unit = {}
+        onShowWelcome: () -> Unit = {},
+        webappBackground: WebappBackgroundSettings = WebappBackgroundSettings(),
+        onSetWebappBackground: (WebappBackgroundSettings) -> Unit = {},
+        onOpenNotificationChannel: (String?) -> Unit = {}
     ) {
         composeTestRule.setContent {
             SettingsScreen(
@@ -361,6 +400,7 @@ class SettingsScreenTest {
                 appUpdateReleaseNotes = null,
                 clientCertificateUri = clientCertificateUri,
                 clientCertificatePassword = clientCertificatePassword,
+                webappBackground = webappBackground,
                 serverValidation = ServerValidationUiState(),
                 appVersionLabel = "Version 0.0.0",
                 serverProfiles = emptyList(),
@@ -376,6 +416,8 @@ class SettingsScreenTest {
                 onCheckSseSupport = {},
                 onCopySsePrompt = {},
                 onSetBlockScreenshotsEnabled = {},
+                onSetWebappBackground = onSetWebappBackground,
+                onOpenNotificationChannel = onOpenNotificationChannel,
                 onSetAppUpdateAlertsEnabled = {},
                 onSetAutomaticAppUpdateChecksEnabled = {},
                 onSetClientCertificateConfig = onSetClientCertificateConfig,

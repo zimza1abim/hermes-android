@@ -1,6 +1,7 @@
 package com.hermeswebui.android.ui
 
 import com.hermeswebui.android.data.AppSettings
+import com.hermeswebui.android.webapp.WebappBackgroundSettings
 
 data class ServerValidationUiState(
     val isChecking: Boolean = false,
@@ -25,6 +26,7 @@ data class MainUiState(
     /** Host shown by the in-flow OAuth chip when an in-app auth flow is on a non-allowlisted origin. */
     val oauthInFlowHost: String? = null,
     val backgroundReconnectEnabled: Boolean = false,
+    val webappBackground: WebappBackgroundSettings = WebappBackgroundSettings(),
     val backgroundActivityFullTextEnabled: Boolean = false,
     val reconnectPollIntervalSeconds: Int = 1,
     val requireVpnForTailscaleEnabled: Boolean = false,

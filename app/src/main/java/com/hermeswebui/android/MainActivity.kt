@@ -129,7 +129,7 @@ import com.hermeswebui.android.ui.MainViewModelFactory
 import com.hermeswebui.android.ui.settings.SettingsScreen
 import com.hermeswebui.android.ui.settings.VpnLaunchAppOption
 import com.hermeswebui.android.ui.web.WebShell
-import com.hermeswebui.android.webapp.WebappBackgroundSettings
+import com.hermeswebui.android.webapp.GatewayAlertKind
 import com.hermeswebui.android.webapp.WebappGatewayCoordinator
 import com.hermeswebui.android.webui.HermesWebUiScripts
 import com.hermeswebui.android.webui.VoiceCaptureLifecycleGate
@@ -384,7 +384,7 @@ class MainActivity : ComponentActivity() {
             activity = this,
             bridgeName = HermesWebappGatewayBridgeName,
             isTrustedSource = ::isTrustedNotificationBridgeSource,
-            initialSettings = WebappBackgroundSettings()
+            initialSettings = settingsRepository.getWebappBackgroundSettings()
         )
         appUpdateCoordinator = HermesAppUpdateCoordinator(
             context = this,
@@ -454,6 +454,7 @@ class MainActivity : ComponentActivity() {
                     state = state,
                     activityVisible = activityVisible
                 )
+                webappGateway.updateSettings(state.webappBackground)
             }
         }
 
@@ -746,6 +747,7 @@ class MainActivity : ComponentActivity() {
                     appUpdateReleaseNotes = uiState.appUpdateReleaseNotes,
                     clientCertificateUri = uiState.clientCertificateUri,
                     clientCertificatePassword = uiState.clientCertificatePassword,
+                    webappBackground = uiState.webappBackground,
                     serverValidation = uiState.serverValidation,
                     appVersionLabel = "Version ${appVersionName()}",
                     serverProfiles = serverProfiles,
@@ -788,6 +790,13 @@ class MainActivity : ComponentActivity() {
                         viewModel.setBlockScreenshotsEnabled(enabled)
                         applyScreenshotSecurity(enabled)
                     },
+                    onSetWebappBackground = { settings ->
+                        if (settings.keepAlive || settings.disabled.size < GatewayAlertKind.entries.size) {
+                            requestNotificationPermissionIfNeeded()
+                        }
+                        viewModel.setWebappBackgroundSettings(settings)
+                    },
+                    onOpenNotificationChannel = ::openNotificationChannelSettings,
                     onSetAppUpdateAlertsEnabled = { enabled ->
                         if (enabled) {
                             requestNotificationPermissionIfNeeded()
@@ -2263,6 +2272,18 @@ class MainActivity : ComponentActivity() {
             val captureFile = File.createTempFile("hermes-upload-", ".jpg", captureDir)
             FileProvider.getUriForFile(this, "$packageName.fileprovider", captureFile)
         }.getOrNull()
+    }
+
+    /** Opens Android's settings for one notification channel, or for the whole app when [channelId] is null. */
+    private fun openNotificationChannelSettings(channelId: String?) {
+        val intent = if (channelId == null) {
+            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+        } else {
+            Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_CHANNEL_ID, channelId)
+        }.putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+        runCatching { startActivity(intent) }.onFailure {
+            Toast.makeText(this, "Could not open notification settings", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun openInExternalBrowser(url: String) {

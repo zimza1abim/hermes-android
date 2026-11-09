@@ -11,10 +11,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
@@ -23,11 +25,14 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.hermeswebui.android.webapp.GatewayAlertKind
+import com.hermeswebui.android.webapp.WebappBackgroundSettings
 
 @Composable
 internal fun UpdatesSettingsSection(
@@ -254,4 +259,105 @@ internal fun AboutSettingsSection(appVersionLabel: String, appUpdateChannelLabel
             colors = ListItemDefaults.colors(containerColor = surfaceColor)
         )
     }
+}
+/**
+ * Official Webapp background settings. The alert rows and their Android channels both come from
+ * [GatewayAlertKind], so a new kind appears here without another edit.
+ */
+@Composable
+internal fun WebappNotificationsSection(
+    settings: WebappBackgroundSettings,
+    onChange: (WebappBackgroundSettings) -> Unit,
+    onOpenChannel: (String?) -> Unit
+) {
+    val surfaceColor = MaterialTheme.colorScheme.surface
+    val outlineVariant = MaterialTheme.colorScheme.outlineVariant
+
+    SectionHeader("Notifications")
+    Box(
+        modifier = Modifier
+            .padding(horizontal = 12.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(surfaceColor)
+            .fillMaxWidth()
+    ) {
+        Column {
+            WebappSwitchRow(
+                title = "Stay connected in the background",
+                summary = "While the official Hermes Agent Webapp is open, keep its connection alive when you switch apps so progress is there when you return. Android shows a quiet ongoing notification.",
+                checked = settings.keepAlive,
+                onCheckedChange = { onChange(settings.copy(keepAlive = it)) }
+            )
+            HorizontalDivider(color = outlineVariant.copy(alpha = 0.5f))
+            WebappSwitchRow(
+                title = "Show message previews",
+                summary = "Include reply text, commands and questions in alerts. The lock screen always hides them.",
+                checked = settings.showPreview,
+                onCheckedChange = { onChange(settings.copy(showPreview = it)) }
+            )
+            GatewayAlertKind.entries.forEach { kind ->
+                HorizontalDivider(color = outlineVariant.copy(alpha = 0.5f))
+                WebappSwitchRow(
+                    title = kind.label,
+                    summary = kind.summary,
+                    checked = settings.isEnabled(kind),
+                    onCheckedChange = { enabled ->
+                        onChange(settings.copy(disabled = if (enabled) settings.disabled - kind else settings.disabled + kind))
+                    },
+                    onOpenChannel = { onOpenChannel(kind.channelId) }
+                )
+            }
+            HorizontalDivider(color = outlineVariant.copy(alpha = 0.5f))
+            ListItem(
+                headlineContent = { Text("Android notification settings", fontWeight = FontWeight.Medium) },
+                supportingContent = {
+                    Text(
+                        "Allow notifications, or change sound and vibration for each kind of alert.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                },
+                trailingContent = { Icon(Icons.Filled.ChevronRight, contentDescription = null) },
+                colors = ListItemDefaults.colors(containerColor = surfaceColor),
+                modifier = Modifier.clickable { onOpenChannel(null) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun WebappSwitchRow(
+    title: String,
+    summary: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    onOpenChannel: (() -> Unit)? = null
+) {
+    val surfaceColor = MaterialTheme.colorScheme.surface
+    val onSurfaceVariant = MaterialTheme.colorScheme.onSurfaceVariant
+    ListItem(
+        headlineContent = { Text(title, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Medium) },
+        supportingContent = { Text(summary, color = onSurfaceVariant, style = MaterialTheme.typography.bodySmall) },
+        trailingContent = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (onOpenChannel != null) {
+                    IconButton(onClick = onOpenChannel) {
+                        Icon(Icons.Filled.Notifications, contentDescription = "Sound and vibration for $title")
+                    }
+                }
+                Switch(
+                    checked = checked,
+                    onCheckedChange = onCheckedChange,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
+                        checkedTrackColor = MaterialTheme.colorScheme.primary,
+                        uncheckedThumbColor = onSurfaceVariant,
+                        uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                )
+            }
+        },
+        colors = ListItemDefaults.colors(containerColor = surfaceColor),
+        modifier = Modifier.clickable { onCheckedChange(!checked) }
+    )
 }

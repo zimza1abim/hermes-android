@@ -9,6 +9,7 @@ import com.hermeswebui.android.data.SettingsStore
 import com.hermeswebui.android.data.SharePayload
 import com.hermeswebui.android.domain.SharedFileHandoff
 import com.hermeswebui.android.update.AppUpdateCheckResult
+import com.hermeswebui.android.webapp.WebappBackgroundSettings
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -48,6 +49,7 @@ class MainViewModel(
     private val _uiState = MutableStateFlow(MainUiState(
         settings = settings,
         backgroundReconnectEnabled = settingsRepositoryImpl?.isBackgroundReconnectEnabled() ?: false,
+        webappBackground = settingsRepositoryImpl?.getWebappBackgroundSettings() ?: WebappBackgroundSettings(),
         backgroundActivityFullTextEnabled = settingsRepositoryImpl?.isBackgroundActivityFullTextEnabled() ?: false,
         reconnectPollIntervalSeconds = settingsRepositoryImpl?.getReconnectPollIntervalSeconds() ?: 1,
         requireVpnForTailscaleEnabled = settingsRepositoryImpl?.isRequireVpnForTailscaleEnabled() ?: false,
@@ -417,6 +419,11 @@ class MainViewModel(
         _uiState.update { it.copy(backgroundReconnectEnabled = enabled) }
     }
 
+    fun setWebappBackgroundSettings(settings: WebappBackgroundSettings) {
+        settingsRepositoryImpl?.setWebappBackgroundSettings(settings)
+        _uiState.update { it.copy(webappBackground = settings) }
+    }
+
     fun setBackgroundActivityFullTextEnabled(enabled: Boolean) {
         settingsRepositoryImpl?.setBackgroundActivityFullTextEnabled(enabled)
         _uiState.update { it.copy(backgroundActivityFullTextEnabled = enabled) }
@@ -534,6 +541,7 @@ class MainViewModel(
         _uiState.update {
             it.copy(
                 backgroundReconnectEnabled = repo.isBackgroundReconnectEnabled(),
+                webappBackground = repo.getWebappBackgroundSettings(),
                 backgroundActivityFullTextEnabled = repo.isBackgroundActivityFullTextEnabled(),
                 reconnectPollIntervalSeconds = repo.getReconnectPollIntervalSeconds(),
                 requireVpnForTailscaleEnabled = repo.isRequireVpnForTailscaleEnabled(),

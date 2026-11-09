@@ -13,6 +13,8 @@ import com.hermeswebui.android.core.security.WebTrustPolicy
 import com.hermeswebui.android.data.SettingsRepository
 import com.hermeswebui.android.data.ServerType
 import com.hermeswebui.android.server.SelectedServerNavigation
+import com.hermeswebui.android.webapp.GatewayAlertKind
+import com.hermeswebui.android.webapp.WebappBackgroundSettings
 import java.util.UUID
 import org.json.JSONArray
 import org.json.JSONObject
@@ -36,6 +38,21 @@ class SelectedServerSettingsInstrumentationTest {
     @After
     fun tearDown() {
         context.deleteTestPreferences()
+    }
+
+    @Test
+    fun webappBackgroundSettingsDefaultOnAndRoundTripTheDisabledKinds() {
+        assertThat(repository.getWebappBackgroundSettings()).isEqualTo(WebappBackgroundSettings())
+
+        val edited = WebappBackgroundSettings(
+            keepAlive = false,
+            showPreview = false,
+            disabled = setOf(GatewayAlertKind.CLARIFY, GatewayAlertKind.TURN_FAILED)
+        )
+        repository.setWebappBackgroundSettings(edited)
+        assertThat(SettingsRepository(context).getWebappBackgroundSettings()).isEqualTo(edited)
+        assertThat(encryptedPreferences().getStringSet("webapp_alerts_disabled", null))
+            .containsExactly("clarify", "turn_failed")
     }
 
     @Test

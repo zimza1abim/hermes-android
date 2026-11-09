@@ -7,6 +7,7 @@ import androidx.security.crypto.MasterKey
 import com.hermeswebui.android.core.security.UrlOrigins
 import com.hermeswebui.android.server.SelectedServerNavigation
 import com.hermeswebui.android.server.ServerProfileRules
+import com.hermeswebui.android.webapp.WebappBackgroundSettings
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
@@ -61,7 +62,7 @@ class SettingsRepository(context: Context) : SettingsStore {
 
     private fun runMigration() {
         val lastMigrationVersion = sharedPreferences.getInt(KEY_LAST_MIGRATION_VERSION, 0)
-        val currentMigrationVersion = 15 // Increment this when adding new migrations
+        val currentMigrationVersion = 16 // Increment this when adding new migrations
 
         if (lastMigrationVersion < 1) {
             // Migration 1: Clear dashboard URLs from pre-0.1.5 versions
@@ -159,7 +160,10 @@ class SettingsRepository(context: Context) : SettingsStore {
         // legacy JSON (including an unreadable document) merely to add a cosmetic label.
         // Migration 15 is additive: absent detectedServerType remains unknown until a
         // configured frontend supplies its runtime marker. Preserve manual overrides.
-        // Neither needs data changes, so only the version marker is written once at the end,
+        // Migration 16 is additive: absent official Webapp background keys read as the
+        // WebappBackgroundSettings defaults, and the stored set lists disabled alert kinds, so
+        // kinds added later start enabled without another migration.
+        // None of these needs data changes, so only the version marker is written once at the end,
         // and not at all when the stored version is already current.
         if (lastMigrationVersion < currentMigrationVersion) {
             sharedPreferences.edit {
@@ -239,6 +243,25 @@ class SettingsRepository(context: Context) : SettingsStore {
 
     fun markWelcomeGuideSeen() {
         sharedPreferences.edit { putBoolean(KEY_WELCOME_GUIDE_SEEN, true) }
+    }
+
+    fun getWebappBackgroundSettings(): WebappBackgroundSettings {
+        val defaults = WebappBackgroundSettings()
+        return WebappBackgroundSettings(
+            keepAlive = sharedPreferences.getBoolean(KEY_WEBAPP_KEEP_ALIVE_ENABLED, defaults.keepAlive),
+            showPreview = sharedPreferences.getBoolean(KEY_WEBAPP_ALERT_PREVIEW_ENABLED, defaults.showPreview),
+            disabled = WebappBackgroundSettings.disabledFromStorage(
+                sharedPreferences.getStringSet(KEY_WEBAPP_ALERTS_DISABLED, null)
+            )
+        )
+    }
+
+    fun setWebappBackgroundSettings(settings: WebappBackgroundSettings) {
+        sharedPreferences.edit {
+            putBoolean(KEY_WEBAPP_KEEP_ALIVE_ENABLED, settings.keepAlive)
+            putBoolean(KEY_WEBAPP_ALERT_PREVIEW_ENABLED, settings.showPreview)
+            putStringSet(KEY_WEBAPP_ALERTS_DISABLED, settings.disabledStorageKeys())
+        }
     }
 
     fun isBackgroundReconnectEnabled(): Boolean {
@@ -551,6 +574,9 @@ class SettingsRepository(context: Context) : SettingsStore {
         private const val KEY_NOTIFICATION_PERMISSION_REQUESTED = "notification_permission_requested"
         private const val KEY_WELCOME_GUIDE_SEEN = "welcome_guide_seen"
         private const val KEY_BACKGROUND_RECONNECT_ENABLED = "background_reconnect_enabled"
+        private const val KEY_WEBAPP_KEEP_ALIVE_ENABLED = "webapp_keep_alive_enabled"
+        private const val KEY_WEBAPP_ALERT_PREVIEW_ENABLED = "webapp_alert_preview_enabled"
+        private const val KEY_WEBAPP_ALERTS_DISABLED = "webapp_alerts_disabled"
         private const val KEY_RECONNECT_POLL_INTERVAL_SECONDS = "reconnect_poll_interval_seconds"
         private const val KEY_REQUIRE_VPN_FOR_TAILSCALE_ENABLED = "require_vpn_for_tailscale_enabled"
         private const val KEY_VPN_LAUNCH_PACKAGE = "vpn_launch_package"
