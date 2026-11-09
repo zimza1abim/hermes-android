@@ -270,6 +270,7 @@ dependencies {
     implementation(libs.androidx.browser)
     implementation(libs.androidx.webkit)
     implementation(libs.androidx.security.crypto)
+    implementation(libs.okhttp)
     "playImplementation"(libs.play.app.update)
     "playImplementation"(libs.play.app.update.ktx)
 
