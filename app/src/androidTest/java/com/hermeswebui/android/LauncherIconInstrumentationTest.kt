@@ -19,6 +19,29 @@ class LauncherIconInstrumentationTest {
     private val context = InstrumentationRegistry.getInstrumentation().targetContext
 
     @Test
+    fun aNeverChosenIconShowsTheAgentLauncherAndReportsIt() {
+        val manager = LauncherIconManager(context)
+        val original = manager.selectedIcon()
+        try {
+            LauncherIcon.entries.forEach { icon ->
+                context.packageManager.setComponentEnabledSetting(
+                    ComponentName(context.packageName, icon.aliasName),
+                    PackageManager.COMPONENT_ENABLED_STATE_DEFAULT,
+                    PackageManager.DONT_KILL_APP
+                )
+            }
+            assertThat(LauncherIconManager(context).selectedIcon()).isEqualTo(LauncherIcon.AGENT)
+            val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                .setPackage(context.packageName)
+            val launchers = context.packageManager.queryIntentActivities(intent, 0)
+            assertThat(launchers).hasSize(1)
+            assertThat(launchers.single().activityInfo.name).isEqualTo(LauncherIcon.AGENT.aliasName)
+        } finally {
+            manager.select(original)
+        }
+    }
+
+    @Test
     fun switchesExactlyOneRealLauncherAliasAndPreservesMainActivityAndRecoveryRoutes() {
         val manager = LauncherIconManager(context)
         val original = manager.selectedIcon()

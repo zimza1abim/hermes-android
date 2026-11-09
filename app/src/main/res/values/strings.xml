@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">Hermes WebUI</string>
+    <string name="app_name">Hermes</string>
     <string name="setup_help_title">Need help setting up a server?</string>
     <string name="setup_help_hide">Hide server setup help</string>
     <string name="setup_help_instructions">Already have Hermes Agent? Copy one of these guided commands and paste it into your existing Hermes chat on the computer or server running Hermes. These are prompts for Hermes, not terminal commands. Android only copies the text; nothing is installed or run on your phone.</string>

@@ -7,7 +7,12 @@ import android.os.Build
 
 enum class LauncherIcon(val aliasName: String) {
     WEBUI("com.hermeswebui.android.WebUiLauncher"),
-    AGENT("com.hermeswebui.android.AgentLauncher")
+    AGENT("com.hermeswebui.android.AgentLauncher");
+
+    companion object {
+        /** The alias the manifest enables; an install whose user never chose an icon shows this. */
+        val DEFAULT = AGENT
+    }
 }
 
 class LauncherIconManager(context: Context) {
@@ -47,7 +52,7 @@ class LauncherIconManager(context: Context) {
 
     private fun isEnabled(icon: LauncherIcon): Boolean =
         when (packageManager.getComponentEnabledSetting(component(icon))) {
-            PackageManager.COMPONENT_ENABLED_STATE_DEFAULT -> icon == LauncherIcon.WEBUI
+            PackageManager.COMPONENT_ENABLED_STATE_DEFAULT -> icon == LauncherIcon.DEFAULT
             PackageManager.COMPONENT_ENABLED_STATE_ENABLED -> true
             else -> false
         }
