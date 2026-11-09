@@ -192,7 +192,10 @@ pending; loopback WebView fixtures cover the Android boundary only.
 
 The page's own gateway WebSocket survives in the background as long as the
 process stays foreground-ranked and the renderer priority is not waived, so
-Android keeps the WebView alive instead of relaying the socket.
+Android keeps the WebView alive instead of relaying the socket. The main
+WebView's renderer is kept IMPORTANT and un-waived at all times, not only while
+hidden: under memory pressure a reaped renderer means a page reload and a
+gateway reconnect.
 
 - `webui/HermesWebUiScripts.buildWebappGatewayTapScript` is a document-start
   script (re-run origin-guarded at runtime, idempotent) that wraps

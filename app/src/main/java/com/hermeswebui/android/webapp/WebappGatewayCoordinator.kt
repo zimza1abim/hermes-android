@@ -51,7 +51,6 @@ class WebappGatewayCoordinator(
     private var dispatching = false
 
     private var webView: WebView? = null
-    private var originalRendererPriority: Pair<Int, Boolean>? = null
     private var replyProxy: JavaScriptReplyProxy? = null
     private var proxyDoc: DocId? = null
     private var receiverRegistered = false
@@ -82,7 +81,9 @@ class WebappGatewayCoordinator(
     /** Attaches the main WebView. After a renderer loss, call again with the replacement, then [onDocumentStarted]. */
     fun install(view: WebView) {
         webView = view
-        originalRendererPriority = view.rendererRequestedPriority to view.rendererPriorityWaivedWhenNotVisible
+        // Keep the renderer important even while the app is on screen: a phone under memory pressure
+        // otherwise reaps it first, and every reap is a page reload and a gateway reconnect.
+        view.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
         if (!receiverRegistered) {
             createChannels(activity)
             ContextCompat.registerReceiver(
@@ -224,13 +225,6 @@ class WebappGatewayCoordinator(
             // Hidden, but the document went away (a reload in the background). A new document
             // usually follows within seconds, and a hidden app may not be allowed to start again.
             handler.postDelayed(deferredStop, KEEP_ALIVE_STOP_GRACE_MS)
-        }
-        val view = webView ?: return
-        val (priority, waived) = originalRendererPriority ?: return
-        if (on) {
-            view.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
-        } else {
-            view.setRendererPriorityPolicy(priority, waived)
         }
     }
 
