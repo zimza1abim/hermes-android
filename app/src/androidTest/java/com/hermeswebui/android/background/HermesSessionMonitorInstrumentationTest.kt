@@ -19,7 +19,6 @@ import com.hermeswebui.android.R
 import com.hermeswebui.android.core.security.UrlPolicy
 import com.hermeswebui.android.core.security.WebTrustPolicy
 import com.hermeswebui.android.data.AppSettings
-import com.hermeswebui.android.data.SettingsRepository
 import com.hermeswebui.android.ui.MainUiState
 import java.net.InetAddress
 import java.net.ServerSocket
@@ -80,8 +79,7 @@ class HermesSessionMonitorInstrumentationTest {
             UrlPolicy(settings.allowedHosts), settings.serverUrl, settings.dashboardUrl
         )
         coordinator = HermesForegroundServiceCoordinator(
-            context, SettingsRepository(context), trust::isTrustedNotificationTarget,
-            { canceledRetries++ }, { error("Debug logging must remain disabled") }
+            context, trust::isTrustedNotificationTarget, { canceledRetries++ }
         )
         state = MainUiState(
             settings = settings,

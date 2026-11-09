@@ -35,7 +35,6 @@ import com.hermeswebui.android.data.HermesApiClient
 import com.hermeswebui.android.data.SettingsRepository
 import com.hermeswebui.android.data.ServerType
 import com.hermeswebui.android.data.DiagnosticsLogger
-import com.hermeswebui.android.background.HermesDebugLoggingService
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.SocketException
@@ -682,7 +681,6 @@ class ProxyAuthRedirectInstrumentationTest {
         // Restore the exact encrypted backing preferences, including keysets, after the test.
         val preferences = context.getSharedPreferences("hermes_secure_prefs", Context.MODE_PRIVATE)
         val original = preferences.all.toMap()
-        val loggingWasEnabled = SettingsRepository(context).isDebugLoggingEnabled()
         ProxyServer(officialWebapp = officialWebapp, oidc = oidc).use { server ->
             try {
                 val repository = SettingsRepository(context)
@@ -694,7 +692,6 @@ class ProxyAuthRedirectInstrumentationTest {
                 }
                 block(server, repository)
             } finally {
-                if (!loggingWasEnabled) HermesDebugLoggingService.stop(context)
                 instrumentation.runOnMainSync {
                     CookieManager.getInstance().setCookie(server.baseUrl, "proxy_auth=; Max-Age=0; Path=/")
                 }

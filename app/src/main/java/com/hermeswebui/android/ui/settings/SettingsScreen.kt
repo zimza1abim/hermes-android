@@ -30,9 +30,7 @@ import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
@@ -105,7 +103,6 @@ fun SettingsScreen(
     vpnLaunchAppOptions: List<VpnLaunchAppOption>,
     sseTransportEnabled: Boolean,
     sseSupportStatus: String?,
-    debugLoggingEnabled: Boolean,
     blockScreenshotsEnabled: Boolean,
     appUpdateAlertsEnabled: Boolean,
     automaticAppUpdateChecksEnabled: Boolean,
@@ -131,7 +128,6 @@ fun SettingsScreen(
     onSetSseTransportEnabled: (Boolean) -> Unit,
     onCheckSseSupport: () -> Unit,
     onCopySsePrompt: () -> Unit,
-    onSetDebugLoggingEnabled: (Boolean) -> Unit,
     onSetBlockScreenshotsEnabled: (Boolean) -> Unit,
     onSetAppUpdateAlertsEnabled: (Boolean) -> Unit,
     onSetAutomaticAppUpdateChecksEnabled: (Boolean) -> Unit,
@@ -140,8 +136,6 @@ fun SettingsScreen(
     onCheckAppUpdates: () -> Unit,
     onDownloadAppUpdate: () -> Unit,
     onOpenAppUpdateRelease: () -> Unit,
-    onShareDebugLog: () -> Unit,
-    onDownloadDebugLog: () -> Unit,
     onViewGithubIssues: () -> Unit,
     onNewGithubIssue: () -> Unit,
     onAddProfile: (String, String, ServerType) -> Unit,
@@ -933,79 +927,25 @@ fun SettingsScreen(
                         .background(surfaceColor)
                         .fillMaxWidth()
                 ) {
-                    Column {
-                        ListItem(
-                            headlineContent = {
-                                Text(
-                                    "Capture debug logs",
-                                    color = onSurface,
-                                    fontWeight = FontWeight.Medium
-                                )
-                            },
-                            supportingContent = {
-                                Text(
-                                    "Captures app, WebView/system logs, and device/server metadata while running. Use Stop on the notification to end capture.",
-                                    color = onSurfaceVar,
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                            },
-                            trailingContent = {
-                                Switch(
-                                    checked = debugLoggingEnabled,
-                                    onCheckedChange = onSetDebugLoggingEnabled,
-                                    colors = SwitchDefaults.colors(
-                                        checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
-                                        checkedTrackColor = primaryColor,
-                                        uncheckedThumbColor = onSurfaceVar,
-                                        uncheckedTrackColor = surfaceVariant
-                                    )
-                                )
-                            },
-                            colors = ListItemDefaults.colors(containerColor = surfaceColor),
-                            modifier = Modifier.clickable {
-                                onSetDebugLoggingEnabled(!debugLoggingEnabled)
-                            }
-                        )
-
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 8.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = onViewGithubIssues,
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                OutlinedButton(
-                                    onClick = onShareDebugLog,
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Icon(Icons.Default.Share, contentDescription = null)
-                                    Text("Share log", modifier = Modifier.padding(start = 8.dp))
-                                }
-                                OutlinedButton(
-                                    onClick = onDownloadDebugLog,
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Icon(Icons.Default.Save, contentDescription = null)
-                                    Text("Save log", modifier = Modifier.padding(start = 8.dp))
-                                }
-                            }
-                            OutlinedButton(
-                                onClick = onViewGithubIssues,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Icon(Icons.Default.Search, contentDescription = null)
-                                Text("View existing issues", modifier = Modifier.padding(start = 8.dp))
-                            }
-                            Button(
-                                onClick = onNewGithubIssue,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Icon(Icons.Default.BugReport, contentDescription = null)
-                                Text("Report an issue", modifier = Modifier.padding(start = 8.dp))
-                            }
+                            Icon(Icons.Default.Search, contentDescription = null)
+                            Text("View existing issues", modifier = Modifier.padding(start = 8.dp))
+                        }
+                        Button(
+                            onClick = onNewGithubIssue,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.BugReport, contentDescription = null)
+                            Text("Report an issue", modifier = Modifier.padding(start = 8.dp))
                         }
                     }
                 }

@@ -31,7 +31,6 @@ data class MainUiState(
     val vpnLaunchPackageName: String = "",
     val sseTransportEnabled: Boolean = false,
     val sseSupportStatus: String? = null,
-    val debugLoggingEnabled: Boolean = false,
     val blockScreenshotsEnabled: Boolean = false,
     val appUpdateAlertsEnabled: Boolean = false,
     val automaticAppUpdateChecksEnabled: Boolean = false,

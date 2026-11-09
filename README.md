@@ -439,7 +439,7 @@ Core runtime areas:
 - `data/` - encrypted settings persistence and local state
 - `domain/` - validation and share-intent parsing
 - `notification/` - Hermes notification bridge and Android notification presentation
-- `background/` - reconnect, debug logging, and foreground-service coordination
+- `background/` - reconnect and foreground-service coordination
 - `server/` - startup preflight and server profile validation/switching
 - `update/` - Play and GitHub update checks and update UX
 - `ui/` - Compose screens and ViewModel state

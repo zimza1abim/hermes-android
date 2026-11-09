@@ -15,7 +15,6 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.google.common.truth.Truth.assertThat
 import com.hermeswebui.android.MainActivity
 import com.hermeswebui.android.R
-import com.hermeswebui.android.background.HermesDebugLoggingService
 import com.hermeswebui.android.data.SettingsRepository
 import org.junit.Rule
 import org.junit.Test
@@ -125,12 +124,10 @@ class WelcomeFirstRunInstrumentationTest {
     private fun withFreshPreferences(block: (SettingsRepository) -> Unit) {
         val preferences = context.getSharedPreferences("hermes_secure_prefs", Context.MODE_PRIVATE)
         val original = preferences.all.toMap()
-        val loggingWasEnabled = SettingsRepository(context).isDebugLoggingEnabled()
         try {
             check(preferences.edit().clear().commit())
             block(SettingsRepository(context))
         } finally {
-            if (!loggingWasEnabled) HermesDebugLoggingService.stop(context)
             val editor = preferences.edit().clear()
             original.forEach { (key, value) ->
                 when (value) {

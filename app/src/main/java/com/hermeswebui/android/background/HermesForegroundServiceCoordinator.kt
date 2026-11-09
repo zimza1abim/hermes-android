@@ -2,22 +2,17 @@ package com.hermeswebui.android.background
 
 import android.content.Context
 import android.webkit.CookieManager
-import com.hermeswebui.android.data.SettingsRepository
 import com.hermeswebui.android.ui.MainUiState
 
 class HermesForegroundServiceCoordinator(
     private val context: Context,
-    private val settingsRepository: SettingsRepository,
     private val isTrustedNotificationTarget: (String) -> Boolean,
-    private val onCancelAutoRetry: () -> Unit,
-    private val onSetDebugLoggingEnabled: (Boolean) -> Unit
+    private val onCancelAutoRetry: () -> Unit
 ) {
     private var reconnectServiceRequest: ReconnectServiceRequest? = null
-    private var debugLoggingServiceRunning = false
 
     fun onUiStateChanged(state: MainUiState, activityVisible: Boolean) {
         syncReconnectForegroundService(state, activityVisible)
-        syncDebugLoggingForegroundService(state.debugLoggingEnabled)
     }
 
     fun onActivityResumed() {
@@ -102,33 +97,4 @@ class HermesForegroundServiceCoordinator(
         val isReconnecting: Boolean,
         val showFullTextOnLockScreen: Boolean
     )
-
-    private fun syncDebugLoggingForegroundService(debugLoggingEnabled: Boolean) {
-        val persistedEnabled = settingsRepository.isDebugLoggingEnabled()
-        if (!debugLoggingEnabled || !persistedEnabled) {
-            if (debugLoggingEnabled && !persistedEnabled) {
-                onSetDebugLoggingEnabled(false)
-            }
-            stopDebugLoggingForegroundService()
-            return
-        }
-        if (debugLoggingServiceRunning) return
-
-        try {
-            HermesDebugLoggingService.start(context)
-            debugLoggingServiceRunning = true
-        } catch (_: IllegalStateException) {
-            debugLoggingServiceRunning = false
-            onSetDebugLoggingEnabled(false)
-        } catch (_: SecurityException) {
-            debugLoggingServiceRunning = false
-            onSetDebugLoggingEnabled(false)
-        }
-    }
-
-    private fun stopDebugLoggingForegroundService() {
-        if (!debugLoggingServiceRunning) return
-        HermesDebugLoggingService.stop(context)
-        debugLoggingServiceRunning = false
-    }
 }

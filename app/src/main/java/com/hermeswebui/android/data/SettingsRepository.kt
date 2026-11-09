@@ -96,13 +96,6 @@ class SettingsRepository(context: Context) : SettingsStore {
             }
         }
 
-        if (lastMigrationVersion < 5) {
-            // Migration 5: Debug logging capture defaults to disabled.
-            if (!sharedPreferences.contains(KEY_DEBUG_LOGGING_ENABLED)) {
-                sharedPreferences.edit { putBoolean(KEY_DEBUG_LOGGING_ENABLED, false) }
-            }
-        }
-
         if (lastMigrationVersion < 6) {
             // Migration 6: SSE transport defaults to disabled until server support is verified.
             if (!sharedPreferences.contains(KEY_SSE_TRANSPORT_ENABLED)) {
@@ -281,14 +274,6 @@ class SettingsRepository(context: Context) : SettingsStore {
 
     fun setVpnLaunchPackageName(packageName: String) {
         sharedPreferences.edit { putString(KEY_VPN_LAUNCH_PACKAGE, packageName.trim()) }
-    }
-
-    fun isDebugLoggingEnabled(): Boolean {
-        return sharedPreferences.getBoolean(KEY_DEBUG_LOGGING_ENABLED, false)
-    }
-
-    fun setDebugLoggingEnabled(enabled: Boolean) {
-        sharedPreferences.edit { putBoolean(KEY_DEBUG_LOGGING_ENABLED, enabled) }
     }
 
     fun isSseTransportEnabled(): Boolean {
@@ -569,7 +554,6 @@ class SettingsRepository(context: Context) : SettingsStore {
         private const val KEY_RECONNECT_POLL_INTERVAL_SECONDS = "reconnect_poll_interval_seconds"
         private const val KEY_REQUIRE_VPN_FOR_TAILSCALE_ENABLED = "require_vpn_for_tailscale_enabled"
         private const val KEY_VPN_LAUNCH_PACKAGE = "vpn_launch_package"
-        private const val KEY_DEBUG_LOGGING_ENABLED = "debug_logging_enabled"
         private const val KEY_SSE_TRANSPORT_ENABLED = "sse_transport_enabled"
         private const val KEY_BLOCK_SCREENSHOTS_ENABLED = "block_screenshots_enabled"
         private const val KEY_BACKGROUND_ACTIVITY_FULL_TEXT_ENABLED = "background_activity_full_text_enabled"

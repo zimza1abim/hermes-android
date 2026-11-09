@@ -3,7 +3,7 @@
 > Maintenance-focused Android wrapper for Hermes Web UI. The core wrapper is
 > good as-is; product UI and workflow changes belong in Hermes WebUI.
 >
-> Last updated: 2026-10-26
+> Last updated: 2026-11-09
 
 ---
 
@@ -207,6 +207,7 @@ sketches are captured inline below.
 
 | ID | Date | Area | Summary |
 |---|---|---|---|
+| CLEANUP-006 | 2026-11-09 | Troubleshooting | Removed the debug log capture feature (DBG-001, DBG-002): the Settings "Capture debug logs" switch with its Share log / Save log buttons, the debug-build floating Save log overlay, the logcat foreground service and its "Debug logging is running" notification, and the debug-build auto-start that re-enabled capture on every launch. Troubleshooting keeps the GitHub issue links; the diagnostic breadcrumb file is unchanged |
 | BUG-057 | 2026-11-07 | Deep links | Fixed Issue #170: `hermes://session/{id}` and `hermes://app/settings` now work when the app starts from a closed state, not only through `onNewIntent`. A cold-start session link feeds the same trusted-route startup override as a notification tap, so `SelectedServerNavigation.startupUrl` still gates it, and the settings link is skipped on activity recreation. Two cold-start API 35 tests failed before the fix and pass after it. |
 | TEST-009 | 2026-11-07 | QA | Closed Issue #150's QA hardening (see QA-001). Added JVM-tested extractions for the LAN preflight, hardware-keyboard, SSE cookie and status-fallback rules, six OIDC/dead-URL/deep-link/Settings flow tests, notification-facade and long-press fixtures, client-certificate password cases and a server-switch session-wipe guard. Each guard was shown to fail when its rule was deliberately broken. |
 | REL-036 | 2026-11-07 | Release preparation | Prepared Android and README metadata for v1.2.0 (version code 10200): the first-run welcome guide (Issue #176) and cold-start `hermes://` deep links (Issue #170). A minor bump because it adds a user-facing feature with no breaking change. Published on 2026-11-07 by orchestration run 42393841270 from commit `402690a`: the GitHub release has exactly `hermes-webui-v1.2.0-github.apk`, and the Play production edit and English description were committed and verified through a fresh Publisher API edit. Play review and public availability are separate and were not confirmed. F-Droid picks up the tag after fdroiddata review (Issue #141). |

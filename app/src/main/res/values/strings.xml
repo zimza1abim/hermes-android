@@ -42,11 +42,6 @@
         <item quantity="one">%1$d second between reconnect checks</item>
         <item quantity="other">%1$d seconds between reconnect checks</item>
     </plurals>
-    <string name="debug_logging_channel_name">Hermes debug logging</string>
-    <string name="debug_logging_channel_description">Persistent troubleshooting capture for Hermes Android behavior</string>
-    <string name="debug_logging_notification_title">Debug logging is running</string>
-    <string name="debug_logging_notification_body">Capturing troubleshooting logs in the background. Tap Stop to end capture.</string>
-    <string name="debug_logging_notification_stop_action">Stop</string>
 
     <string name="welcome_skip">Skip</string>
     <string name="welcome_back">Back</string>

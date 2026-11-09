@@ -23,7 +23,6 @@ import android.net.Uri
 import android.util.Base64
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.os.Message
 import android.os.SystemClock
 import android.provider.Settings
@@ -100,7 +99,6 @@ import androidx.webkit.ScriptHandler
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
-import com.hermeswebui.android.background.DebugLogBootstrap
 import com.hermeswebui.android.background.HermesForegroundServiceCoordinator
 import com.hermeswebui.android.core.network.HardwareKeyboardState
 import com.hermeswebui.android.ui.onboarding.WelcomeGate
@@ -128,7 +126,6 @@ import com.hermeswebui.android.domain.ShareIntentParser
 import com.hermeswebui.android.domain.TailscaleEndpointDetector
 import com.hermeswebui.android.ui.MainViewModel
 import com.hermeswebui.android.ui.MainViewModelFactory
-import com.hermeswebui.android.ui.DebugLogFloatingOverlay
 import com.hermeswebui.android.ui.settings.SettingsScreen
 import com.hermeswebui.android.ui.settings.VpnLaunchAppOption
 import com.hermeswebui.android.ui.web.WebShell
@@ -337,12 +334,6 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Begin logcat capture to an app-private file BEFORE any other onCreate
-        // work, so a crash or permission denial during startup is still captured.
-        // No-op on release builds. The foreground service (later in onCreate)
-        // takes over long-term ownership and presents the Stop notification.
-        DebugLogBootstrap.startIfDebuggable(applicationContext)
-
         val defaultUrl = getString(R.string.default_server_url)
         val defaultDashboardUrl = getString(R.string.default_dashboard_url)
         settingsRepository = SettingsRepository(applicationContext)
@@ -419,10 +410,8 @@ class MainActivity : ComponentActivity() {
         )
         foregroundServiceCoordinator = HermesForegroundServiceCoordinator(
             context = this,
-            settingsRepository = settingsRepository,
             isTrustedNotificationTarget = ::isTrustedNotificationTarget,
-            onCancelAutoRetry = viewModel::cancelAutoRetry,
-            onSetDebugLoggingEnabled = viewModel::setDebugLoggingEnabled
+            onCancelAutoRetry = viewModel::cancelAutoRetry
         )
         urlPolicy = UrlPolicy(viewModel.uiState.value.settings.allowedHosts)
 
@@ -430,12 +419,6 @@ class MainActivity : ComponentActivity() {
         WebView.setWebContentsDebuggingEnabled(isDebuggable)
         ensureNotificationChannel()
 
-        // Auto-enable debug logging on debuggable builds so tester logs capture from app launch.
-        // Users can still manually toggle this off from Settings → Troubleshooting.
-        if (isDebuggable && !settingsRepository.isDebugLoggingEnabled()) {
-            settingsRepository.setDebugLoggingEnabled(true)
-            viewModel.setDebugLoggingEnabled(true)
-        }
         applyScreenshotSecurity(settingsRepository.isBlockScreenshotsEnabled())
         webView = buildWebView()
         installHermesWebUiDocumentStartFixes(webView, viewModel.uiState.value.settings.serverUrl)
@@ -734,7 +717,6 @@ class MainActivity : ComponentActivity() {
                     vpnLaunchAppOptions = vpnLaunchAppOptions,
                     sseTransportEnabled = uiState.sseTransportEnabled,
                     sseSupportStatus = uiState.sseSupportStatus,
-                    debugLoggingEnabled = uiState.debugLoggingEnabled,
                     blockScreenshotsEnabled = uiState.blockScreenshotsEnabled,
                     appUpdateAlertsEnabled = uiState.appUpdateAlertsEnabled,
                     automaticAppUpdateChecksEnabled = uiState.automaticAppUpdateChecksEnabled,
@@ -784,16 +766,6 @@ class MainActivity : ComponentActivity() {
                         )
                     },
                     onCopySsePrompt = { copySseEnablePromptToClipboard() },
-                    onSetDebugLoggingEnabled = { enabled ->
-                        if (enabled) {
-                            requestNotificationPermissionIfNeeded()
-                        }
-                        viewModel.setDebugLoggingEnabled(enabled)
-                        foregroundServiceCoordinator.onUiStateChanged(
-                            state = viewModel.uiState.value,
-                            activityVisible = activityVisible
-                        )
-                    },
                     onSetBlockScreenshotsEnabled = { enabled ->
                         viewModel.setBlockScreenshotsEnabled(enabled)
                         applyScreenshotSecurity(enabled)
@@ -828,8 +800,6 @@ class MainActivity : ComponentActivity() {
                             else -> openInExternalBrowser(releaseUrl)
                         }
                     },
-                    onShareDebugLog = { shareLatestDebugLog() },
-                    onDownloadDebugLog = { downloadLatestDebugLog() },
                     onViewGithubIssues = { openInExternalBrowser(HermesGithubIssuesListUrl) },
                     onNewGithubIssue = { openInExternalBrowser(HermesGithubNewIssueUrl) },
                     onAddProfile = { name, url, type -> serverProfileCoordinator.handleAddServerProfile(name, url, type) },
@@ -867,19 +837,6 @@ class MainActivity : ComponentActivity() {
                     onFinish = { finishWelcomeGuide() },
                     modifier = Modifier.windowInsetsPadding(WindowInsets.safeDrawing)
                 )
-            }
-
-            // Debug-only: draggable floating overlay that shares the latest
-            // captured debug log with one tap. Auto-enabled debug logging in
-            // onCreate() means a log is being captured from app start, so this
-            // gives testers a frictionless way to ship the file out. Rendered
-            // ABOVE the Settings sheet too, because the most common moment a
-            // tester hits a connection error is exactly when Settings is open
-            // (e.g. failed first-run server preflight) and they need to send
-            // the log right then.
-            val isDebuggable = (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
-            if (isDebuggable) {
-                DebugLogFloatingOverlay(onTap = { shareLatestDebugLog() })
             }
         } // end outer Box
     } // end MaterialTheme
@@ -1656,74 +1613,6 @@ class MainActivity : ComponentActivity() {
             description = "Task completion and attention notifications from Hermes WebUI"
         }
         getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
-    }
-
-    private fun latestDebugLogFile(): File? {
-        val logDir = File(filesDir, "debug-logs")
-        return logDir
-            .listFiles()
-            ?.filter { it.isFile && it.extension.equals("log", ignoreCase = true) }
-            ?.maxByOrNull { it.lastModified() }
-    }
-
-    private fun shareLatestDebugLog() {
-        val source = latestDebugLogFile()
-        if (source == null) {
-            Toast.makeText(this, "No debug log found yet", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        val uri = runCatching {
-            FileProvider.getUriForFile(this, "$packageName.fileprovider", source)
-        }.getOrNull()
-        if (uri == null) {
-            Toast.makeText(this, "Unable to share debug log", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        val shareIntent = Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(Intent.EXTRA_SUBJECT, "Hermes Android debug log")
-            putExtra(Intent.EXTRA_TEXT, "Attach this log to your GitHub issue.")
-            putExtra(Intent.EXTRA_STREAM, uri)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        val chooser = Intent.createChooser(shareIntent, "Share debug log")
-        try {
-            startActivity(chooser)
-        } catch (_: ActivityNotFoundException) {
-            Toast.makeText(this, "No app found to share debug logs", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun downloadLatestDebugLog() {
-        val source = latestDebugLogFile()
-        if (source == null) {
-            Toast.makeText(this, "No debug log found yet", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        val exportDir = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "HermesLogs")
-        if (!exportDir.exists() && !exportDir.mkdirs()) {
-            Toast.makeText(this, "Unable to prepare download folder", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        val target = File(exportDir, source.name)
-        val copied = runCatching {
-            source.copyTo(target, overwrite = true)
-            target
-        }.getOrNull()
-        if (copied == null) {
-            Toast.makeText(this, "Failed to save debug log", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        Toast.makeText(
-            this,
-            "Saved log to Android/data/$packageName/files/Download/HermesLogs",
-            Toast.LENGTH_LONG
-        ).show()
     }
 
     private fun isTrustedNotificationTarget(url: String?): Boolean {

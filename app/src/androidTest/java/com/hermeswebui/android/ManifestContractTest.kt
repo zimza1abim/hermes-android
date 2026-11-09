@@ -9,7 +9,6 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.filters.SdkSuppress
 import com.google.common.truth.Truth.assertThat
-import com.hermeswebui.android.background.HermesDebugLoggingService
 import com.hermeswebui.android.background.HermesReconnectService
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -62,17 +61,12 @@ class ManifestContractTest {
             ComponentName(context, HermesReconnectService::class.java),
             PackageManager.ComponentInfoFlags.of(0)
         )
-        val debugService = packageManager.getServiceInfo(
-            ComponentName(context, HermesDebugLoggingService::class.java),
-            PackageManager.ComponentInfoFlags.of(0)
-        )
         val provider = packageManager.getProviderInfo(
             ComponentName(context.packageName, "androidx.core.content.FileProvider"),
             PackageManager.ComponentInfoFlags.of(0)
         )
 
         assertThat(reconnectService.exported).isFalse()
-        assertThat(debugService.exported).isFalse()
         assertThat(provider.exported).isFalse()
         assertThat(provider.grantUriPermissions).isTrue()
     }

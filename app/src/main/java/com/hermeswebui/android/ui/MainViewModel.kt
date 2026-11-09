@@ -53,7 +53,6 @@ class MainViewModel(
         requireVpnForTailscaleEnabled = settingsRepositoryImpl?.isRequireVpnForTailscaleEnabled() ?: false,
         vpnLaunchPackageName = settingsRepositoryImpl?.getVpnLaunchPackageName().orEmpty(),
         sseTransportEnabled = settingsRepositoryImpl?.isSseTransportEnabled() ?: false,
-        debugLoggingEnabled = settingsRepositoryImpl?.isDebugLoggingEnabled() ?: false,
         blockScreenshotsEnabled = settingsRepositoryImpl?.isBlockScreenshotsEnabled() ?: false,
         appUpdateAlertsEnabled = settingsRepositoryImpl?.isAppUpdateAlertsEnabled() ?: false,
         automaticAppUpdateChecksEnabled = settingsRepositoryImpl?.isAutomaticAppUpdateChecksEnabled() ?: false,
@@ -439,11 +438,6 @@ class MainViewModel(
         _uiState.update { it.copy(vpnLaunchPackageName = packageName.trim()) }
     }
 
-    fun setDebugLoggingEnabled(enabled: Boolean) {
-        settingsRepositoryImpl?.setDebugLoggingEnabled(enabled)
-        _uiState.update { it.copy(debugLoggingEnabled = enabled) }
-    }
-
     fun setBlockScreenshotsEnabled(enabled: Boolean) {
         settingsRepositoryImpl?.setBlockScreenshotsEnabled(enabled)
         _uiState.update { it.copy(blockScreenshotsEnabled = enabled) }
@@ -545,7 +539,6 @@ class MainViewModel(
                 requireVpnForTailscaleEnabled = repo.isRequireVpnForTailscaleEnabled(),
                 vpnLaunchPackageName = repo.getVpnLaunchPackageName(),
                 sseTransportEnabled = repo.isSseTransportEnabled(),
-                debugLoggingEnabled = repo.isDebugLoggingEnabled(),
                 blockScreenshotsEnabled = repo.isBlockScreenshotsEnabled(),
                 appUpdateAlertsEnabled = repo.isAppUpdateAlertsEnabled(),
                 automaticAppUpdateChecksEnabled = repo.isAutomaticAppUpdateChecksEnabled(),
