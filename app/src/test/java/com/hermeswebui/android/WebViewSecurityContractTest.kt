@@ -226,8 +226,19 @@ class WebViewSecurityContractTest {
         assertThat(coordinator).contains(".setPackage(activity.packageName)")
         val allow = coordinator.substringAfter("\"Allow\"").substringBefore(".build()")
         assertThat(allow).contains(".setAuthenticationRequired(true)")
+        listOf("choiceIntent(actions.target, index)", "replyIntent(actions.target)").forEach { action ->
+            assertWithMessage(action).that(coordinator.substringAfter(action).substringBefore(".build()"))
+                .contains(".setAuthenticationRequired(true)")
+        }
         assertThat(coordinator).contains("PendingIntent.FLAG_IMMUTABLE")
-        assertThat(coordinator).doesNotContain("FLAG_MUTABLE")
+        // Only the free-text reply is mutable, because Android writes the typed answer into it.
+        val mutable = Regex("""\bFLAG_MUTABLE\b""").findAll(coordinator).count()
+        assertThat(mutable).isEqualTo(1)
+        val reply = bodiesOf(coordinator, "private fun replyIntent(").single()
+        assertThat(reply).contains("PendingIntent.FLAG_MUTABLE")
+        assertThat(reply).contains("answerIntent(target, \"reply\")")
+        val answerIntent = coordinator.substringAfter("private fun answerIntent(").substringBefore("companion object")
+        assertThat(answerIntent).contains(".setPackage(activity.packageName)")
     }
 
     @Test

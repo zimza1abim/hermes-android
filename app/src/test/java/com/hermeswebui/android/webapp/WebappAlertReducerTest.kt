@@ -1,6 +1,7 @@
 package com.hermeswebui.android.webapp
 
 import com.google.common.truth.Truth.assertThat
+import com.google.common.truth.Truth.assertWithMessage
 import com.hermeswebui.android.webapp.WebappEffect.Cancel
 import com.hermeswebui.android.webapp.WebappEffect.FocusSession
 import com.hermeswebui.android.webapp.WebappEffect.KeepAlive
@@ -26,7 +27,7 @@ class WebappAlertReducerTest {
         "s1", approvalId, "r1", "rm -rf build", "Delete build output", "terminal", ApprovalChoice.entries,
     )
     private val clarifyKey = PromptKey(1, RpcId.fromToken("9")!!)
-    private val clarify = GatewayEvent.ClarifyRequested("s1", clarifyKey.rpcId, "Which branch?")
+    private val clarify = GatewayEvent.ClarifyRequested("s1", clarifyKey.rpcId, listOf(ClarifyQuestion("q1", "Which branch?")))
     private val completed = GatewayEvent.TurnEnded("s1", TurnOutcome.COMPLETE, "All done", null)
 
     /** Runs inputs in order and returns the final state plus the effects of the last input. */
@@ -118,11 +119,11 @@ class WebappAlertReducerTest {
     fun `an approval shows with an answer target while hidden`() {
         val alert = (effectsOf(*hidden, Inbound(doc, 1, approval)).single() as Post).alert
         assertThat(alert).isEqualTo(
-            Alert(GatewayAlertKind.APPROVAL, approvalKey.encode(), "s1", "Approval needed", "rm -rf build", AnswerTarget(doc, approvalKey))
+            Alert(GatewayAlertKind.APPROVAL, approvalKey.encode(), "s1", "Approval needed", "rm -rf build", AlertActions.Decide(AnswerTarget(doc, approvalKey)))
         )
         val question = (effectsOf(*hidden, Inbound(doc, 1, clarify)).single() as Post).alert
         assertThat(question).isEqualTo(
-            Alert(GatewayAlertKind.CLARIFY, clarifyKey.encode(), "s1", "Hermes has a question", "Which branch?", null)
+            Alert(GatewayAlertKind.CLARIFY, clarifyKey.encode(), "s1", "Hermes has a question", "Which branch?", AlertActions.Reply(AnswerTarget(doc, clarifyKey)))
         )
     }
 
@@ -132,7 +133,7 @@ class WebappAlertReducerTest {
         assertThat(effectsOf(*open, Visibility(true)))
             .containsExactly(Cancel(GatewayAlertKind.APPROVAL, approvalKey.encode()), KeepAlive(false))
         val again = effectsOf(*open, Visibility(true), Visibility(false))
-        assertThat(again.filterIsInstance<Post>().single().alert.answer).isEqualTo(AnswerTarget(doc, approvalKey))
+        assertThat(again.filterIsInstance<Post>().single().alert.actions).isEqualTo(AlertActions.Decide(AnswerTarget(doc, approvalKey)))
     }
 
     @Test
@@ -143,7 +144,7 @@ class WebappAlertReducerTest {
 
     @Test
     fun `tray allow sends the encoded answer and hides the prompt`() {
-        val effects = effectsOf(*hidden, Inbound(doc, 1, approval), TrayAnswer(AnswerTarget(doc, approvalKey), Decision.ALLOW))
+        val effects = effectsOf(*hidden, Inbound(doc, 1, approval), TrayAnswer(AnswerTarget(doc, approvalKey), TrayReply.Decide(Decision.ALLOW)))
         assertThat(effects).containsExactly(
             Send(doc, 1, approvalKey, GatewayProtocol.encodeApprovalAnswer(approvalId, ApprovalChoice.ONCE)),
             Cancel(GatewayAlertKind.APPROVAL, approvalKey.encode()),
@@ -152,7 +153,7 @@ class WebappAlertReducerTest {
 
     @Test
     fun `a failed send re-posts the prompt and a successful one forgets it`() {
-        val sending = arrayOf(*hidden, Inbound(doc, 1, approval), TrayAnswer(AnswerTarget(doc, approvalKey), Decision.DENY))
+        val sending = arrayOf(*hidden, Inbound(doc, 1, approval), TrayAnswer(AnswerTarget(doc, approvalKey), TrayReply.Decide(Decision.DENY)))
         assertThat(effectsOf(*sending, SendResult(doc, approvalKey, ok = false)).single()).isInstanceOf(Post::class.java)
         val (state, effects) = run(*sending, SendResult(doc, approvalKey, ok = true))
         assertThat(effects).isEmpty()
@@ -162,14 +163,81 @@ class WebappAlertReducerTest {
     @Test
     fun `a prompt already sending is not sent twice`() {
         val target = AnswerTarget(doc, approvalKey)
-        assertThat(effectsOf(*hidden, Inbound(doc, 1, approval), TrayAnswer(target, Decision.ALLOW), TrayAnswer(target, Decision.DENY)))
+        assertThat(effectsOf(*hidden, Inbound(doc, 1, approval), TrayAnswer(target, TrayReply.Decide(Decision.ALLOW)), TrayAnswer(target, TrayReply.Decide(Decision.DENY))))
             .isEmpty()
     }
 
+    private fun clarifyWith(vararg questions: ClarifyQuestion) =
+        GatewayEvent.ClarifyRequested("s1", clarifyKey.rpcId, questions.toList())
+
+    private fun clarifyActions(request: GatewayEvent.ClarifyRequested, settings: WebappBackgroundSettings = WebappBackgroundSettings()) =
+        (run(Hello(doc), SettingsChanged(settings), Visibility(false), Inbound(doc, 1, request)).second
+            .filterIsInstance<Post>().single()).alert.actions
+
     @Test
-    fun `clarify prompts cannot be answered from the tray`() {
-        assertThat(effectsOf(*hidden, Inbound(doc, 1, clarify), TrayAnswer(AnswerTarget(doc, clarifyKey), Decision.ALLOW)))
-            .isEmpty()
+    fun `a one-question clarify offers a button per choice up to three, else a reply`() {
+        val target = AnswerTarget(doc, clarifyKey)
+        assertThat(clarifyActions(clarifyWith(ClarifyQuestion("q1", "Pick", listOf("a", "b", "c")))))
+            .isEqualTo(AlertActions.Choose(target, listOf("a", "b", "c")))
+        assertThat(clarifyActions(clarifyWith(ClarifyQuestion("q1", "Pick", listOf("a")))))
+            .isEqualTo(AlertActions.Choose(target, listOf("a")))
+        assertThat(clarifyActions(clarifyWith(ClarifyQuestion("q1", "Pick", listOf("a", "b", "c", "d")))))
+            .isEqualTo(AlertActions.Reply(target))
+        assertThat(clarifyActions(clarify)).isEqualTo(AlertActions.Reply(target))
+    }
+
+    @Test
+    fun `multi-question, multi-select, id-less and preview-off clarifies are tap-only`() {
+        assertThat(clarifyActions(clarifyWith(ClarifyQuestion("q1", "One"), ClarifyQuestion("q2", "Two")))).isNull()
+        assertThat(clarifyActions(clarifyWith(ClarifyQuestion("q1", "Pick", listOf("a", "b"), multiSelect = true)))).isNull()
+        assertThat(clarifyActions(clarifyWith(ClarifyQuestion(null, "Which?")))).isNull()
+        assertThat(clarifyActions(clarify, WebappBackgroundSettings(showPreview = false))).isNull()
+    }
+
+    @Test
+    fun `a clarify with many choices lists them under the question`() {
+        val request = clarifyWith(ClarifyQuestion("q1", "Pick", listOf("a", "b", "c", "d")))
+        val alert = (effectsOf(*hidden, Inbound(doc, 1, request)).single() as Post).alert
+        assertThat(alert.body).isEqualTo("Pick\n• a\n• b\n• c\n• d")
+        val few = (effectsOf(*hidden, Inbound(doc, 1, clarifyWith(ClarifyQuestion("q1", "Pick", listOf("a"))))).single() as Post)
+        assertThat(few.alert.body).isEqualTo("Pick")
+    }
+
+    @Test
+    fun `a tray choice or reply sends the clarify answer and hides the prompt`() {
+        val target = AnswerTarget(doc, clarifyKey)
+        val choices = clarifyWith(ClarifyQuestion("q1", "Pick", listOf("main", "dev")))
+        assertThat(effectsOf(*hidden, Inbound(doc, 1, choices), TrayAnswer(target, TrayReply.Choose(1)))).containsExactly(
+            Send(doc, 1, clarifyKey, GatewayProtocol.encodeClarifyAnswer(clarifyKey.rpcId, "q1", "dev")),
+            Cancel(GatewayAlertKind.CLARIFY, clarifyKey.encode()),
+        ).inOrder()
+        assertThat(effectsOf(*hidden, Inbound(doc, 1, clarify), TrayAnswer(target, TrayReply.Reply("  feature/x \n"))).first())
+            .isEqualTo(Send(doc, 1, clarifyKey, GatewayProtocol.encodeClarifyAnswer(clarifyKey.rpcId, "q1", "feature/x")))
+        val failed = effectsOf(
+            *hidden, Inbound(doc, 1, clarify), TrayAnswer(target, TrayReply.Reply("x")), SendResult(doc, clarifyKey, ok = false),
+        )
+        assertThat((failed.single() as Post).alert.actions).isEqualTo(AlertActions.Reply(target))
+    }
+
+    @Test
+    fun `tray replies that do not match the prompt's actions are dropped`() {
+        val target = AnswerTarget(doc, clarifyKey)
+        val choices = clarifyWith(ClarifyQuestion("q1", "Pick", listOf("main", "dev")))
+        val two = clarifyWith(ClarifyQuestion("q1", "One"), ClarifyQuestion("q2", "Two"))
+        listOf(
+            clarify to TrayReply.Decide(Decision.ALLOW),
+            clarify to TrayReply.Choose(0),
+            clarify to TrayReply.Reply("   "),
+            choices to TrayReply.Reply("main"),
+            choices to TrayReply.Choose(2),
+            choices to TrayReply.Choose(-1),
+            two to TrayReply.Reply("x"),
+        ).forEach { (request, reply) ->
+            assertWithMessage("$reply").that(effectsOf(*hidden, Inbound(doc, 1, request), TrayAnswer(target, reply))).isEmpty()
+        }
+        assertThat(
+            effectsOf(*hidden, Inbound(doc, 1, approval), TrayAnswer(AnswerTarget(doc, approvalKey), TrayReply.Choose(0)))
+        ).isEmpty()
     }
 
     @Test
@@ -205,7 +273,7 @@ class WebappAlertReducerTest {
         val docB = DocId("doc-b")
         val open = arrayOf(*hidden, Inbound(doc, 1, approval))
         assertThat(effectsOf(*open, Hello(docB))).containsExactly(Cancel(GatewayAlertKind.APPROVAL, approvalKey.encode()))
-        assertThat(effectsOf(*open, Hello(docB), TrayAnswer(AnswerTarget(doc, approvalKey), Decision.ALLOW))).isEmpty()
+        assertThat(effectsOf(*open, Hello(docB), TrayAnswer(AnswerTarget(doc, approvalKey), TrayReply.Decide(Decision.ALLOW)))).isEmpty()
         assertThat(effectsOf(*open, Hello(docB), Inbound(doc, 1, completed))).isEmpty()
         assertThat(effectsOf(*open, DocumentGone))
             .containsExactly(Cancel(GatewayAlertKind.APPROVAL, approvalKey.encode()), KeepAlive(false))

@@ -65,9 +65,17 @@ sealed interface GatewayEvent {
     data class ClarifyRequested(
         override val sessionId: String,
         override val rpcId: RpcId,
-        val question: String?,
+        val questions: List<ClarifyQuestion>,
     ) : PromptRequest
 }
+
+/** One question of a clarify request. Its answer is keyed by [qid]; without one it cannot be answered. */
+data class ClarifyQuestion(
+    val qid: String?,
+    val question: String?,
+    val choices: List<String> = emptyList(),
+    val multiSelect: Boolean = false,
+)
 
 /**
  * The only code that knows the gateway's JSON-RPC shapes (hermes-agent `tui_gateway/contracts`).
@@ -102,6 +110,10 @@ object GatewayProtocol {
 
     fun encodeApprovalAnswer(rpcId: RpcId, choice: ApprovalChoice): String =
         """{"jsonrpc":"2.0","id":${rpcId.json},"result":${JSONObject().put("choice", choice.wire)}}"""
+
+    /** A clarify result answering one question; the gateway reads `{answers: {qid: text}}`. */
+    fun encodeClarifyAnswer(rpcId: RpcId, qid: String, text: String): String =
+        """{"jsonrpc":"2.0","id":${rpcId.json},"result":${JSONObject().put("answers", JSONObject().put(qid, text))}}"""
 
     /** Allow picks `once` when offered, else the first non-deny choice. Null when nothing fits. */
     fun choiceFor(decision: Decision, offered: List<ApprovalChoice>): ApprovalChoice? = when (decision) {
@@ -155,8 +167,18 @@ object GatewayProtocol {
 
     private fun parseClarify(rpcId: RpcId, params: JSONObject): GatewayEvent? {
         val sessionId = string(params, "session_id") ?: return null
-        val first = params.optJSONArray("questions")?.optJSONObject(0)
-        return GatewayEvent.ClarifyRequested(sessionId, rpcId, first?.let { string(it, "question") })
+        val raw = params.optJSONArray("questions")
+        val questions = if (raw == null) emptyList() else (0 until raw.length()).mapNotNull { index ->
+            raw.optJSONObject(index)?.let { question ->
+                ClarifyQuestion(
+                    qid = string(question, "qid"),
+                    question = string(question, "question"),
+                    choices = strings(question.optJSONArray("choices")).filter { it.isNotBlank() },
+                    multiSelect = question.opt("multi_select") == true,
+                )
+            }
+        }
+        return GatewayEvent.ClarifyRequested(sessionId, rpcId, questions)
     }
 
     private fun parseObject(raw: String): JSONObject? =

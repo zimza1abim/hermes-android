@@ -207,7 +207,10 @@ Android keeps the WebView alive instead of relaying the socket.
   hidden for over 25 s is dead (the server-side reader is separate work).
 - `webapp/GatewayProtocol` is the only code that knows the JSON-RPC shapes
   (`message.complete`, `approval`, `clarify`, `approval.cancelled`,
-  `background.complete`, `session.title`) and encodes approval answers.
+  `background.complete`, `session.title`) and encodes approval and clarify
+  answers. A clarify keeps every question (`qid`, text, non-blank choices,
+  `multi_select`); its answer is `{"answers":{"<qid>":"<text>"}}` echoing
+  the raw request id.
 - `webapp/WebappAlerts` holds `GatewayAlertKind`, the single list behind the
   channels, settings rows, disabled-kind storage keys and notification id
   ranges, plus `WebappAlertReducer`. The reducer is pure: keep-alive is on
@@ -224,6 +227,15 @@ Android keeps the WebView alive instead of relaying the socket.
   redacted public version, and an open-app intent that never loads a URL.
   Allow/Deny are immutable broadcasts to a receiver registered not-exported
   for the activity's lifetime; Allow requires device unlock on Android 12+.
+  The reducer decides each alert's `AlertActions`: approvals `Decide`; a
+  clarify with exactly one single-select question that has a `qid` gets
+  `Choose` (1-3 choices, one button each) or `Reply` (free text through
+  `RemoteInput`); multi-question clarifies and previews off are tap-only. A
+  `TrayReply` is accepted only when it matches what the prompt offers, then
+  goes out on the page's socket like an approval (same `sending` hide, same
+  restore on `sendFailed`). Every clarify action requires device unlock. The
+  reply PendingIntent is the only mutable one, because Android writes the
+  typed text into it; it stays package-scoped to the same receiver.
 - The shared notification facade (`HermesWebUiScripts.buildNotificationBridgeScript`)
   does not post a page notification whose tag starts with `hermes:` while
   `window.__HERMES_UI_SURFACE__ === 'webapp'` (read when the notification is

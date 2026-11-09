@@ -32,7 +32,7 @@ class GatewayProtocolTest {
                     listOf(ApprovalChoice.SESSION, ApprovalChoice.DENY),
                 ),
             """{"jsonrpc":"2.0","id":9,"method":"clarify","params":{"session_id":"s1","questions":[{"qid":"q1","question":"Which branch?","multi_select":false}]}}""" to
-                GatewayEvent.ClarifyRequested("s1", RpcId.fromToken("9")!!, "Which branch?"),
+                GatewayEvent.ClarifyRequested("s1", RpcId.fromToken("9")!!, listOf(ClarifyQuestion("q1", "Which branch?"))),
             event("approval.cancelled", """{"session_id":"s1","reason":"timeout","cancelled_count":1,"request_ids":["r1"]}""") to
                 GatewayEvent.ApprovalCancelled("s1", setOf("r1")),
             event("approval.cancelled", """{"reason":"interrupted"}""") to
@@ -72,6 +72,41 @@ class GatewayProtocolTest {
             """not json approval""",
             "",
         ).forEach { frame -> assertWithMessage(frame).that(GatewayProtocol.parseInbound(frame)).isNull() }
+    }
+
+    @Test
+    fun `clarify keeps every question with its id, non-blank choices and selection mode`() {
+        val parsed = GatewayProtocol.parseInbound(
+            """{"jsonrpc":"2.0","id":"c1","method":"clarify","params":{"session_id":"s1","questions":[""" +
+                """{"qid":"q1","question":"Branch?","choices":["main",""," ",3,"dev"]},""" +
+                """{"qid":"q2","question":"Perms?","choices":["r","w"],"multi_select":true},""" +
+                """{"question":"No id"},7]}}"""
+        )
+        assertThat(parsed).isEqualTo(
+            GatewayEvent.ClarifyRequested(
+                "s1", RpcId.fromToken("\"c1\"")!!,
+                listOf(
+                    ClarifyQuestion("q1", "Branch?", listOf("main", "dev")),
+                    ClarifyQuestion("q2", "Perms?", listOf("r", "w"), multiSelect = true),
+                    ClarifyQuestion(null, "No id"),
+                ),
+            )
+        )
+    }
+
+    @Test
+    fun `the clarify answer echoes the raw id and keys the text by question id`() {
+        listOf(RpcId.fromToken("9")!!, RpcId.fromToken("\"c-1\"")!!).forEach { id ->
+            val frame = GatewayProtocol.encodeClarifyAnswer(id, "q\"1", "say \"hi\"\n")
+            val answer = JSONObject(frame)
+            assertThat(answer.getString("jsonrpc")).isEqualTo("2.0")
+            assertThat(RpcId.of(answer.get("id"))).isEqualTo(id)
+            assertThat(answer.getJSONObject("result").getJSONObject("answers").getString("q\"1")).isEqualTo("say \"hi\"\n")
+            assertThat(answer.getJSONObject("result").length()).isEqualTo(1)
+            assertThat(GatewayProtocol.parseResponseId(frame)).isEqualTo(id)
+        }
+        assertThat(GatewayProtocol.encodeClarifyAnswer(RpcId.fromToken("9")!!, "q1", "dev"))
+            .isEqualTo("""{"jsonrpc":"2.0","id":9,"result":{"answers":{"q1":"dev"}}}""")
     }
 
     @Test

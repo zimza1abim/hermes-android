@@ -93,6 +93,10 @@ in the background you also get native alerts when a task finishes, fails or
 is stopped, when a background task finishes, when Hermes has a question, and
 when it asks to run a command. An approval alert offers **Allow** (the phone
 must be unlocked) and **Deny**, answered over the page's own connection.
+A question with one to three choices gets a button per choice, and any other
+single question gets a **Reply** box; both need an unlocked phone and are
+answered the same way. A question set with several questions opens the app
+when tapped. With previews hidden, question alerts have no answer buttons.
 Tapping an alert brings Hermes back without reloading the page and opens
 that alert's session when the page has its own notification for it. Alerts for
 open prompts disappear when you return, because the page shows them itself.

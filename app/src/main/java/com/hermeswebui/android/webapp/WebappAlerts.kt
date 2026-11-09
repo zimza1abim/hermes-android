@@ -116,6 +116,27 @@ data class WebappState(
 
 data class AnswerTarget(val doc: DocId, val prompt: PromptKey)
 
+/** The tray actions an alert offers; each answers [target]. */
+sealed interface AlertActions {
+    val target: AnswerTarget
+
+    /** Allow and Deny on an approval. */
+    data class Decide(override val target: AnswerTarget) : AlertActions
+
+    /** One button per choice of a one-question clarify. */
+    data class Choose(override val target: AnswerTarget, val choices: List<String>) : AlertActions
+
+    /** A free-text reply to a one-question clarify. */
+    data class Reply(override val target: AnswerTarget) : AlertActions
+}
+
+/** An answer from the tray; it must match the actions the prompt offers. */
+sealed interface TrayReply {
+    data class Decide(val decision: Decision) : TrayReply
+    data class Choose(val index: Int) : TrayReply
+    data class Reply(val text: String) : TrayReply
+}
+
 /** What the shell renders. The body is already removed when previews are off. */
 data class Alert(
     val kind: GatewayAlertKind,
@@ -125,8 +146,8 @@ data class Alert(
     val sessionId: String,
     val title: String,
     val body: String?,
-    /** Set only for approvals, which carry Allow and Deny actions. */
-    val answer: AnswerTarget?,
+    /** Null when the alert is tap-only. */
+    val actions: AlertActions?,
 )
 
 /** Inputs, already validated by the shell. Raw bridge text never reaches the reducer. */
@@ -138,7 +159,7 @@ sealed interface WebappInput {
     data class Responded(val doc: DocId, val sock: Int, val rpcId: RpcId) : WebappInput
     data class SocketClosed(val doc: DocId, val sock: Int) : WebappInput
     data class SendResult(val doc: DocId, val prompt: PromptKey, val ok: Boolean) : WebappInput
-    data class TrayAnswer(val target: AnswerTarget, val decision: Decision) : WebappInput
+    data class TrayAnswer(val target: AnswerTarget, val reply: TrayReply) : WebappInput
     data class Visibility(val visible: Boolean) : WebappInput
     data class SettingsChanged(val settings: WebappBackgroundSettings) : WebappInput
     /** An alert tap brought the app forward and names the session to open. */
@@ -164,12 +185,17 @@ sealed interface WebappEffect {
  *    after each input, so no path can leave a stale Allow/Deny in the tray.
  *  - One-shot alerts are posted only while hidden and enabled.
  *  - Only [WebappInput.Hello] changes the document; any other input naming another document is dropped.
- *  - A send is emitted only for an open approval that is not already sending.
+ *  - A send is emitted only for an open prompt that is not already sending, and only for a reply
+ *    that matches what the prompt offers: a decision for an approval, a choice or text for a
+ *    one-question, single-select clarify (choices for 1-[MAX_CHOICE_ACTIONS] choices, else text).
+ *    A multi-question clarify is tap-only. Previews off hide clarify actions with the question.
  *  - A focus request is delivered at most once, only while visible and a document is live; a new
  *    document drops it.
  */
 object WebappAlertReducer {
     private const val MAX_DETAIL = 1_000
+    const val MAX_CHOICE_ACTIONS = 3
+    private const val MAX_REPLY = 4_000
 
     fun reduce(state: WebappState, input: WebappInput): Pair<WebappState, List<WebappEffect>> {
         val (applied, actions) = apply(state, input)
@@ -243,10 +269,47 @@ object WebappAlertReducer {
         val doc = state.docFor(input.target.doc) ?: return state to emptyList()
         val key = input.target.prompt
         val prompt = doc.prompts[key]?.takeUnless { it.sending } ?: return state to emptyList()
-        val request = prompt.request as? GatewayEvent.ApprovalRequested ?: return state to emptyList()
-        val choice = GatewayProtocol.choiceFor(input.decision, request.choices) ?: return state to emptyList()
-        val send = WebappEffect.Send(doc.id, key.sock, key, GatewayProtocol.encodeApprovalAnswer(request.rpcId, choice))
+        val frame = answerFrame(prompt.request, input.reply) ?: return state to emptyList()
+        val send = WebappEffect.Send(doc.id, key.sock, key, frame)
         return state.withPrompts(doc, doc.prompts + (key to prompt.copy(sending = true))) to listOf(send)
+    }
+
+    private fun answerFrame(request: GatewayEvent.PromptRequest, reply: TrayReply): String? = when (request) {
+        is GatewayEvent.ApprovalRequested -> (reply as? TrayReply.Decide)
+            ?.let { GatewayProtocol.choiceFor(it.decision, request.choices) }
+            ?.let { GatewayProtocol.encodeApprovalAnswer(request.rpcId, it) }
+        is GatewayEvent.ClarifyRequested -> answerable(request)?.let { question ->
+            val text = when {
+                reply is TrayReply.Choose && question.offersChoices -> question.choices.getOrNull(reply.index)
+                reply is TrayReply.Reply && !question.offersChoices -> reply.text.trim().take(MAX_REPLY).ifEmpty { null }
+                else -> null
+            }
+            text?.let { GatewayProtocol.encodeClarifyAnswer(request.rpcId, question.qid, it) }
+        }
+    }
+
+    /** The one question of a clarify that tray actions can answer. */
+    private class Answerable(val qid: String, val choices: List<String>) {
+        val offersChoices: Boolean get() = choices.size in 1..MAX_CHOICE_ACTIONS
+    }
+
+    /** Exactly one question, with an id, single-select; anything else is tap-only. */
+    private fun answerable(request: GatewayEvent.ClarifyRequested): Answerable? {
+        val question = request.questions.singleOrNull()?.takeUnless { it.multiSelect } ?: return null
+        return question.qid?.let { Answerable(it, question.choices) }
+    }
+
+    private fun clarifyActions(state: WebappState, request: GatewayEvent.ClarifyRequested, target: AnswerTarget): AlertActions? {
+        if (!state.settings.showPreview) return null
+        val question = answerable(request) ?: return null
+        return if (question.offersChoices) AlertActions.Choose(target, question.choices) else AlertActions.Reply(target)
+    }
+
+    private fun clarifyDetail(request: GatewayEvent.ClarifyRequested): String? {
+        val question = request.questions.singleOrNull()
+            ?: return request.questions.mapNotNull { it.question }.joinToString("\n").ifEmpty { null }
+        val listed = question.choices.takeIf { it.size > MAX_CHOICE_ACTIONS }.orEmpty()
+        return (listOfNotNull(question.question) + listed.map { "• $it" }).joinToString("\n").ifEmpty { null }
     }
 
     private fun oneShotAlert(state: WebappState, doc: GatewayDocument, event: GatewayEvent): Alert? {
@@ -261,7 +324,7 @@ object WebappAlertReducer {
             else -> return null
         }
         if (state.visible || !state.settings.isEnabled(kind)) return null
-        return alert(state, doc, kind, event.sessionId, event.sessionId, headline, detail, answer = null)
+        return alert(state, doc, kind, event.sessionId, event.sessionId, headline, detail, actions = null)
     }
 
     private fun promptAlert(state: WebappState, doc: GatewayDocument, key: PromptKey, prompt: OpenPrompt): Alert {
@@ -270,11 +333,11 @@ object WebappAlertReducer {
             is GatewayEvent.ApprovalRequested -> alert(
                 state, doc, GatewayAlertKind.APPROVAL, encoded, request.sessionId, "Approval needed",
                 request.command ?: request.description ?: request.toolName,
-                AnswerTarget(doc.id, key),
+                AlertActions.Decide(AnswerTarget(doc.id, key)),
             )
             is GatewayEvent.ClarifyRequested -> alert(
                 state, doc, GatewayAlertKind.CLARIFY, encoded, request.sessionId, "Hermes has a question",
-                request.question, answer = null,
+                clarifyDetail(request), clarifyActions(state, request, AnswerTarget(doc.id, key)),
             )
         }
     }
@@ -287,7 +350,7 @@ object WebappAlertReducer {
         sessionId: String,
         headline: String,
         detail: String?,
-        answer: AnswerTarget?,
+        actions: AlertActions?,
     ): Alert {
         val preview = state.settings.showPreview
         val sessionTitle = doc.titles[sessionId]?.takeIf { preview }
@@ -297,7 +360,7 @@ object WebappAlertReducer {
             sessionId = sessionId,
             title = if (sessionTitle != null) "$headline · $sessionTitle" else headline,
             body = detail?.takeIf { preview }?.trim()?.take(MAX_DETAIL)?.ifEmpty { null },
-            answer = answer,
+            actions = actions,
         )
     }
 

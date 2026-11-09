@@ -12,12 +12,14 @@ import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.webkit.WebView
 import androidx.activity.ComponentActivity
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.app.RemoteInput
 import androidx.core.content.ContextCompat
 import androidx.webkit.JavaScriptReplyProxy
 import androidx.webkit.WebViewCompat
@@ -62,10 +64,13 @@ class WebappGatewayCoordinator(
         override fun onReceive(context: Context, intent: Intent) {
             val doc = intent.getStringExtra(EXTRA_DOC)?.let(::DocId) ?: return
             val prompt = intent.getStringExtra(EXTRA_PROMPT)?.let(PromptKey::decode) ?: return
-            val decision = intent.getStringExtra(EXTRA_DECISION)
+            val reply = intent.getStringExtra(EXTRA_DECISION)
                 ?.let { name -> Decision.entries.firstOrNull { it.name == name } }
+                ?.let(TrayReply::Decide)
+                ?: intent.getIntExtra(EXTRA_CHOICE, -1).takeIf { it >= 0 }?.let(TrayReply::Choose)
+                ?: RemoteInput.getResultsFromIntent(intent)?.getCharSequence(KEY_REPLY)?.toString()?.let(TrayReply::Reply)
                 ?: return
-            dispatch(WebappInput.TrayAnswer(AnswerTarget(doc, prompt), decision))
+            dispatch(WebappInput.TrayAnswer(AnswerTarget(doc, prompt), reply))
         }
     }
 
@@ -289,13 +294,33 @@ class WebappGatewayCoordinator(
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setPublicVersion(publicVersion)
         alert.body?.let { body -> builder.setContentText(body).setStyle(NotificationCompat.BigTextStyle().bigText(body)) }
-        alert.answer?.let { target ->
-            builder.addAction(
-                NotificationCompat.Action.Builder(0, "Allow", answerIntent(target, Decision.ALLOW))
+        when (val actions = alert.actions) {
+            is AlertActions.Decide -> {
+                builder.addAction(
+                    NotificationCompat.Action.Builder(0, "Allow", decisionIntent(actions.target, Decision.ALLOW))
+                        .setAuthenticationRequired(true)
+                        .build()
+                )
+                builder.addAction(
+                    NotificationCompat.Action.Builder(0, "Deny", decisionIntent(actions.target, Decision.DENY)).build()
+                )
+            }
+            // A clarify answer can steer the agent as much as Allow, so each needs an unlocked device.
+            is AlertActions.Choose -> actions.choices.forEachIndexed { index, choice ->
+                builder.addAction(
+                    NotificationCompat.Action.Builder(0, choice, choiceIntent(actions.target, index))
+                        .setAuthenticationRequired(true)
+                        .build()
+                )
+            }
+            is AlertActions.Reply -> builder.addAction(
+                NotificationCompat.Action.Builder(0, "Reply", replyIntent(actions.target))
                     .setAuthenticationRequired(true)
+                    .setAllowGeneratedReplies(false)
+                    .addRemoteInput(RemoteInput.Builder(KEY_REPLY).setLabel("Your answer").build())
                     .build()
             )
-            builder.addAction(NotificationCompat.Action.Builder(0, "Deny", answerIntent(target, Decision.DENY)).build())
+            null -> Unit
         }
         runCatching {
             NotificationManagerCompat.from(activity)
@@ -303,19 +328,38 @@ class WebappGatewayCoordinator(
         }
     }
 
-    private fun answerIntent(target: AnswerTarget, decision: Decision): PendingIntent {
-        val intent = Intent(ACTION_ANSWER)
+    private fun decisionIntent(target: AnswerTarget, decision: Decision): PendingIntent =
+        PendingIntent.getBroadcast(
+            activity, 0,
+            answerIntent(target, decision.name).putExtra(EXTRA_DECISION, decision.name),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+    private fun choiceIntent(target: AnswerTarget, index: Int): PendingIntent =
+        PendingIntent.getBroadcast(
+            activity, 0,
+            answerIntent(target, "choice-$index").putExtra(EXTRA_CHOICE, index),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+    /** The only mutable answer intent: Android writes the typed text into it. It stays package-scoped. */
+    private fun replyIntent(target: AnswerTarget): PendingIntent {
+        val mutable = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0
+        return PendingIntent.getBroadcast(
+            activity, 0, answerIntent(target, "reply"), PendingIntent.FLAG_UPDATE_CURRENT or mutable
+        )
+    }
+
+    private fun answerIntent(target: AnswerTarget, slot: String): Intent =
+        Intent(ACTION_ANSWER)
             .setPackage(activity.packageName)
-            // Distinct data per prompt and decision keeps Android from reusing another prompt's PendingIntent.
+            // Distinct data per prompt and action keeps Android from reusing another prompt's PendingIntent.
             .setData(
                 Uri.Builder().scheme(ANSWER_SCHEME).authority(target.doc.value)
-                    .appendPath(target.prompt.encode()).appendPath(decision.name).build()
+                    .appendPath(target.prompt.encode()).appendPath(slot).build()
             )
             .putExtra(EXTRA_DOC, target.doc.value)
             .putExtra(EXTRA_PROMPT, target.prompt.encode())
-            .putExtra(EXTRA_DECISION, decision.name)
-        return PendingIntent.getBroadcast(activity, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-    }
 
     companion object {
         const val ACTION_ANSWER = "com.hermeswebui.android.action.WEBAPP_ANSWER"
@@ -323,6 +367,8 @@ class WebappGatewayCoordinator(
         private const val EXTRA_DOC = "com.hermeswebui.android.extra.WEBAPP_DOC"
         private const val EXTRA_PROMPT = "com.hermeswebui.android.extra.WEBAPP_PROMPT"
         private const val EXTRA_DECISION = "com.hermeswebui.android.extra.WEBAPP_DECISION"
+        private const val EXTRA_CHOICE = "com.hermeswebui.android.extra.WEBAPP_CHOICE"
+        private const val KEY_REPLY = "com.hermeswebui.android.extra.WEBAPP_REPLY"
         private const val KEEP_ALIVE_STOP_GRACE_MS = 15_000L
         private const val NETWORK_SETTLE_MS = 1_000L
         private const val MAX_SESSION_ID = 256
