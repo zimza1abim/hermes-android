@@ -33,17 +33,30 @@ enum class Decision { ALLOW, DENY }
 sealed interface GatewayEvent {
     val sessionId: String
 
+    /** [seq] is the server's per-session event number, the same on every socket that sees the frame. */
     data class TurnEnded(
         override val sessionId: String,
         val outcome: TurnOutcome,
         val text: String?,
         val error: String?,
+        val seq: Long? = null,
     ) : GatewayEvent
 
-    data class BackgroundCompleted(override val sessionId: String, val text: String?) : GatewayEvent
+    data class BackgroundCompleted(override val sessionId: String, val text: String?, val seq: Long? = null) : GatewayEvent
 
-    /** The chat's title, from `session.title` or the title in `session.info`; never blank. */
+    /** The chat's title from `session.title`; never blank. */
     data class SessionTitled(override val sessionId: String, val title: String) : GatewayEvent
+
+    /** A `session.info` snapshot. Each field is null when the payload leaves it out. */
+    data class SessionInfo(
+        override val sessionId: String,
+        val storedId: String?,
+        val running: Boolean?,
+        val title: String?,
+    ) : GatewayEvent
+
+    /** The server withdrew one open request (`request.cancel`): timed out, interrupted, resolved elsewhere. */
+    data class RequestCancelled(override val sessionId: String, val rpcId: RpcId) : GatewayEvent
 
     /** Matches the `request_id` of each approval it withdraws; empty withdraws every approval in the session. */
     data class ApprovalCancelled(override val sessionId: String, val requestIds: Set<String>) : GatewayEvent
@@ -78,6 +91,28 @@ data class ClarifyQuestion(
     val multiSelect: Boolean = false,
 )
 
+/** The attach answer to a `session.resume` the monitor sent: the runtime id events will carry. */
+data class ResumeSnapshot(
+    val runtimeId: String,
+    val storedId: String,
+    val running: Boolean,
+    val title: String?,
+    /** The session's unanswered server requests that the app models. */
+    val openRequests: List<GatewayEvent.PromptRequest>,
+)
+
+/** One frame the native monitor socket received, reduced to what the app acts on. */
+sealed interface MonitorFrame {
+    data object Ready : MonitorFrame
+    data class Inbound(val event: GatewayEvent) : MonitorFrame
+    /** The answer to `client.capabilities`; [declinesNotShown] says a 4404 decline does not settle a request. */
+    data class Capabilities(val requestId: Int, val declinesNotShown: Boolean) : MonitorFrame
+    /** The answer to one of the monitor's `session.resume` calls; null when the server refused it. */
+    data class Resumed(val requestId: Int, val snapshot: ResumeSnapshot?) : MonitorFrame
+    /** A window-owned server request (preview, terminal, window read, tour) that no app window shows. */
+    data class WindowRequest(val rpcId: RpcId) : MonitorFrame
+}
+
 /**
  * The only code that knows the gateway's JSON-RPC shapes (hermes-agent `tui_gateway/contracts`).
  * Wire types stay in this file; callers see [GatewayEvent] and [RpcId].
@@ -88,11 +123,19 @@ object GatewayProtocol {
      * frame. The script is built from this list, and a test asserts every parseable fixture
      * contains one, so the parser and the filter cannot drift apart.
      */
-    val WATCHED_MARKERS: List<String> =
-        listOf("message.complete", "approval", "clarify", "background.complete", "session.title", "session.info")
+    val WATCHED_MARKERS: List<String> = listOf(
+        "message.complete", "approval", "clarify", "background.complete", "session.title", "session.info", "request.cancel",
+    )
 
-    fun parseInbound(raw: String): GatewayEvent? {
-        val frame = parseObject(raw) ?: return null
+    /** Server requests only the window showing the session answers; every other client declines them. */
+    private val WINDOW_OWNED = setOf("preview.read", "preview.act", "terminal.read", "window.read", "tour")
+
+    /** Error code of a "no window here shows this session" decline (hermes-agent `server_requests.NOT_SHOWN_CODE`). */
+    private const val NOT_SHOWN_CODE = 4404
+
+    fun parseInbound(raw: String): GatewayEvent? = parseObject(raw)?.let(::parseFrame)
+
+    private fun parseFrame(frame: JSONObject): GatewayEvent? {
         val params = frame.optJSONObject("params") ?: return null
         return when (string(frame, "method")) {
             "event" -> parseEvent(params)
@@ -101,6 +144,53 @@ object GatewayProtocol {
             else -> null
         }
     }
+
+    /** Parses a frame from the monitor socket. Responses are matched by the integer ids the monitor sends. */
+    fun parseMonitorFrame(raw: String): MonitorFrame? {
+        val frame = parseObject(raw) ?: return null
+        val method = string(frame, "method")
+        if (method == null) {
+            val id = frame.opt("id") as? Int ?: return null
+            val result = frame.optJSONObject("result")
+            return when {
+                result?.has("server_requests") == true ->
+                    MonitorFrame.Capabilities(id, result.opt("declines_not_shown") == true)
+                frame.has("error") || result != null -> MonitorFrame.Resumed(id, result?.let(::parseResume))
+                else -> null
+            }
+        }
+        if (method in WINDOW_OWNED) return RpcId.of(frame.opt("id"))?.let(MonitorFrame::WindowRequest)
+        if (method == "event" && string(frame.optJSONObject("params") ?: JSONObject(), "type") == "gateway.ready") {
+            return MonitorFrame.Ready
+        }
+        return parseFrame(frame)?.let(MonitorFrame::Inbound)
+    }
+
+    private fun parseResume(result: JSONObject): ResumeSnapshot? {
+        val runtimeId = string(result, "session_id") ?: return null
+        val info = result.optJSONObject("info") ?: JSONObject()
+        val storedId = string(result, "session_key") ?: string(info, "stored_session_id") ?: return null
+        val open = result.optJSONArray("open_requests")
+        val requests = if (open == null) emptyList() else (0 until open.length()).mapNotNull { index ->
+            open.optJSONObject(index)?.let(::parseFrame) as? GatewayEvent.PromptRequest
+        }
+        return ResumeSnapshot(runtimeId, storedId, result.opt("running") == true, string(info, "title")?.trim(), requests)
+    }
+
+    fun encodeCapabilities(requestId: Int): String =
+        """{"jsonrpc":"2.0","id":$requestId,"method":"client.capabilities","params":{"server_requests":true}}"""
+
+    /** Attaches the monitor to a stored session as a viewer without loading its transcript. */
+    fun encodeResume(requestId: Int, storedId: String): String {
+        val params = JSONObject().put("session_id", storedId).put("lazy", true).put("omit_messages", true).put("inline_images", false)
+        return """{"jsonrpc":"2.0","id":$requestId,"method":"session.resume","params":$params}"""
+    }
+
+    fun encodeNotShown(rpcId: RpcId): String =
+        """{"jsonrpc":"2.0","id":${rpcId.json},"error":{"code":$NOT_SHOWN_CODE,"message":"No app window shows this session"}}"""
+
+    fun encodePing(id: String): String =
+        """{"jsonrpc":"2.0","id":${JSONObject.quote(id)},"method":"gateway.ping","params":{}}"""
 
     /** The id of a page-sent JSON-RPC response (`result` or `error`, no `method`), else null. */
     fun parseResponseId(raw: String): RpcId? {
@@ -126,6 +216,7 @@ object GatewayProtocol {
     private fun parseEvent(params: JSONObject): GatewayEvent? {
         val payload = params.optJSONObject("payload") ?: JSONObject()
         val sessionId = string(params, "session_id") ?: string(payload, "session_id") ?: return null
+        val seq = (params.opt("seq") as? Number)?.takeIf { it is Int || it is Long }?.toLong()
         return when (string(params, "type")) {
             "message.complete" -> {
                 val outcome = when (string(payload, "status") ?: "complete") {
@@ -139,10 +230,18 @@ object GatewayProtocol {
                     outcome,
                     text = string(payload, "text"),
                     error = string(payload, "error") ?: string(payload, "failure_reason"),
+                    seq = seq,
                 )
             }
-            "background.complete" -> GatewayEvent.BackgroundCompleted(sessionId, string(payload, "text"))
-            "session.title", "session.info" -> string(payload, "title")?.let { GatewayEvent.SessionTitled(sessionId, it.trim()) }
+            "background.complete" -> GatewayEvent.BackgroundCompleted(sessionId, string(payload, "text"), seq)
+            "session.title" -> string(payload, "title")?.let { GatewayEvent.SessionTitled(sessionId, it.trim()) }
+            "session.info" -> GatewayEvent.SessionInfo(
+                sessionId,
+                storedId = string(payload, "stored_session_id"),
+                running = payload.opt("running") as? Boolean,
+                title = string(payload, "title")?.trim(),
+            ).takeIf { it.storedId != null || it.running != null || it.title != null }
+            "request.cancel" -> RpcId.of(payload.opt("id"))?.let { GatewayEvent.RequestCancelled(sessionId, it) }
             "approval.cancelled" -> GatewayEvent.ApprovalCancelled(
                 sessionId,
                 strings(payload.optJSONArray("request_ids")).toSet(),

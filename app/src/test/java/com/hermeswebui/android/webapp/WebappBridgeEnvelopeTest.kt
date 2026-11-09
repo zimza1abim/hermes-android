@@ -22,11 +22,11 @@ class WebappBridgeEnvelopeTest {
             .isEqualTo(WebappInput.Responded(doc, 2, RpcId.fromToken("7")!!))
         assertThat(WebappBridgeEnvelope.parse(envelope("t" to "close", "sock" to 2)))
             .isEqualTo(WebappInput.SocketClosed(doc, 2))
-        val key = PromptKey(2, RpcId.fromToken("7")!!)
-        assertThat(WebappBridgeEnvelope.parse(envelope("t" to "sent", "sock" to 2, "key" to key.encode())))
-            .isEqualTo(WebappInput.SendResult(doc, key, ok = true))
-        assertThat(WebappBridgeEnvelope.parse(envelope("t" to "sendFailed", "sock" to 2, "key" to key.encode())))
-            .isEqualTo(WebappInput.SendResult(doc, key, ok = false))
+        val id = RpcId.fromToken("\"srq-1\"")!!
+        assertThat(WebappBridgeEnvelope.parse(envelope("t" to "sent", "sock" to 2, "key" to id.json)))
+            .isEqualTo(WebappInput.SendResult(id, ok = true))
+        assertThat(WebappBridgeEnvelope.parse(envelope("t" to "sendFailed", "sock" to 2, "key" to id.json)))
+            .isEqualTo(WebappInput.SendResult(id, ok = false))
     }
 
     @Test

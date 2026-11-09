@@ -41,8 +41,13 @@ class GatewayProtocolTest {
                 GatewayEvent.BackgroundCompleted("s1", "Report ready"),
             event("session.title", """{"title":"Fix the build"}""") to
                 GatewayEvent.SessionTitled("s1", "Fix the build"),
-            event("session.info", """{"model":"m","tools":{},"skills":{},"cwd":"/w","title":" Fix the build ","running":false}""") to
-                GatewayEvent.SessionTitled("s1", "Fix the build"),
+            event("session.info", """{"model":"m","tools":{},"skills":{},"cwd":"/w","title":" Fix the build ","running":false,"stored_session_id":"k1"}""") to
+                GatewayEvent.SessionInfo("s1", "k1", running = false, title = "Fix the build"),
+            event("session.info", """{"running":true}""") to GatewayEvent.SessionInfo("s1", null, running = true, title = null),
+            event("message.complete", """{"text":"Done"}""").replace("\"payload\"", "\"seq\":12,\"payload\"") to
+                GatewayEvent.TurnEnded("s1", TurnOutcome.COMPLETE, "Done", null, seq = 12),
+            event("request.cancel", """{"id":"srq-1","method":"approval","reason":"resolved"}""") to
+                GatewayEvent.RequestCancelled("s1", RpcId.fromToken("\"srq-1\"")!!),
         )
     }
 
@@ -68,6 +73,7 @@ class GatewayProtocolTest {
             event("session.title", """{}"""),
             event("session.info", """{"model":"m","title":""}"""),
             event("session.info", """{"model":"m"}"""),
+            event("request.cancel", """{"method":"approval"}"""),
             """{"jsonrpc":"2.0","method":"event","params":{"type":"message.complete","payload":{}}}""",
             """{"jsonrpc":"2.0","method":"approval","params":{"session_id":"s1"}}""",
             """{"jsonrpc":"2.0","id":1.5,"method":"approval","params":{"session_id":"s1"}}""",
@@ -162,5 +168,67 @@ class GatewayProtocolTest {
         assertThat(GatewayProtocol.choiceFor(Decision.ALLOW, listOf(ApprovalChoice.DENY))).isNull()
         assertThat(GatewayProtocol.choiceFor(Decision.DENY, ApprovalChoice.entries)).isEqualTo(ApprovalChoice.DENY)
         assertThat(GatewayProtocol.choiceFor(Decision.DENY, listOf(ApprovalChoice.ONCE))).isNull()
+    }
+
+    @Test
+    fun `monitor frames parse to ready, events, capabilities, resume answers and window requests`() {
+        assertThat(GatewayProtocol.parseMonitorFrame("""{"jsonrpc":"2.0","method":"event","params":{"type":"gateway.ready","payload":{"heartbeat":true}}}"""))
+            .isEqualTo(MonitorFrame.Ready)
+        assertThat(GatewayProtocol.parseMonitorFrame(approvalFrame)).isEqualTo(MonitorFrame.Inbound(fixtures.getValue(approvalFrame)))
+        assertThat(GatewayProtocol.parseMonitorFrame("""{"jsonrpc":"2.0","id":1,"result":{"server_requests":["approval"],"declines_not_shown":true}}"""))
+            .isEqualTo(MonitorFrame.Capabilities(1, declinesNotShown = true))
+        val resumed = """{"jsonrpc":"2.0","id":2,"result":{"session_id":"rt1","session_key":"k1","running":true,""" +
+            """"info":{"title":" Fix ","stored_session_id":"k1"},"messages":[],"open_requests":[""" +
+            """{"id":"srq-1","method":"approval","params":{"session_id":"rt1","choices":["once","deny"]}},""" +
+            """{"id":"srq-2","method":"sudo","params":{"session_id":"rt1"}}]}}"""
+        assertThat(GatewayProtocol.parseMonitorFrame(resumed)).isEqualTo(
+            MonitorFrame.Resumed(
+                2,
+                ResumeSnapshot(
+                    "rt1", "k1", running = true, title = "Fix",
+                    openRequests = listOf(
+                        GatewayEvent.ApprovalRequested(
+                            "rt1", RpcId.fromToken("\"srq-1\"")!!, null, null, null, null, listOf(ApprovalChoice.ONCE, ApprovalChoice.DENY),
+                        )
+                    ),
+                ),
+            )
+        )
+        assertThat(GatewayProtocol.parseMonitorFrame("""{"jsonrpc":"2.0","id":3,"error":{"code":4007,"message":"session not found"}}"""))
+            .isEqualTo(MonitorFrame.Resumed(3, null))
+        assertThat(GatewayProtocol.parseMonitorFrame("""{"jsonrpc":"2.0","id":"srq-9","method":"preview.read","params":{"session_id":"rt1"}}"""))
+            .isEqualTo(MonitorFrame.WindowRequest(RpcId.fromToken("\"srq-9\"")!!))
+        listOf(
+            """{"jsonrpc":"2.0","id":"android-ping-1","result":{"ok":true}}""",
+            """{"jsonrpc":"2.0","id":"srq-3","method":"sudo","params":{"session_id":"rt1"}}""",
+            """{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":"rt1","payload":{}}}""",
+        ).forEach { frame -> assertWithMessage(frame).that(GatewayProtocol.parseMonitorFrame(frame)).isNull() }
+    }
+
+    @Test
+    fun `monitor requests encode the stored id and the not-shown decline`() {
+        val resume = JSONObject(GatewayProtocol.encodeResume(4, "k\"1")).getJSONObject("params")
+        assertThat(resume.getString("session_id")).isEqualTo("k\"1")
+        assertThat(resume.getBoolean("lazy")).isTrue()
+        assertThat(resume.getBoolean("omit_messages")).isTrue()
+        assertThat(resume.getBoolean("inline_images")).isFalse()
+        val decline = JSONObject(GatewayProtocol.encodeNotShown(RpcId.fromToken("\"srq-9\"")!!))
+        assertThat(decline.getString("id")).isEqualTo("srq-9")
+        assertThat(decline.getJSONObject("error").getInt("code")).isEqualTo(4404)
+    }
+
+    @Test
+    fun `the monitor endpoint keeps the server's base path`() {
+        assertThat(MonitorEndpoint.from("https://h.example:8443/hermes/?x=1#/s"))
+            .isEqualTo(
+                MonitorEndpoint(
+                    "https://h.example:8443",
+                    "https://h.example:8443/hermes/api/webapp/socket-ticket?socket=gateway",
+                    "wss://h.example:8443/hermes/api/ws?native_dial=browser",
+                )
+            )
+        assertThat(MonitorEndpoint.from("http://10.0.0.2:9119")?.socketUrl).isEqualTo("ws://10.0.0.2:9119/api/ws?native_dial=browser")
+        assertThat(MonitorEndpoint.from("ftp://h")).isNull()
+        assertThat(MonitorEndpoint.from("not a url")).isNull()
     }
 }

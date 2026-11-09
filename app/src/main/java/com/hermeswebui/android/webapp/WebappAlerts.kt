@@ -69,21 +69,17 @@ data class WebappBackgroundSettings(
 @JvmInline
 value class DocId(val value: String)
 
-/** Identifies an open prompt within one document: the tap's socket number plus the request id. */
-data class PromptKey(val sock: Int, val rpcId: RpcId) {
-    fun encode(): String = "$sock|${rpcId.json}"
+/** Where an open prompt was delivered, and so where its answer can go. */
+sealed interface PromptRoute {
+    /** A socket of the live page document, numbered by the tap. */
+    data class Page(val sock: Int) : PromptRoute
 
-    companion object {
-        fun decode(text: String): PromptKey? {
-            val sock = text.substringBefore('|', "").toIntOrNull()?.takeIf { it > 0 } ?: return null
-            val rpcId = RpcId.fromToken(text.substringAfter('|')) ?: return null
-            return PromptKey(sock, rpcId)
-        }
-    }
+    data object Monitor : PromptRoute
 }
 
 data class OpenPrompt(
     val request: GatewayEvent.PromptRequest,
+    val routes: Set<PromptRoute>,
     /** A tray answer is in flight; the prompt is hidden until it succeeds or fails. */
     val sending: Boolean = false,
 ) {
@@ -94,29 +90,48 @@ data class OpenPrompt(
         }
 }
 
-data class GatewayDocument(
-    val id: DocId,
-    val prompts: Map<PromptKey, OpenPrompt> = emptyMap(),
-    /** sessionId to chat title, newest last, bounded to [MAX_TITLES]. */
-    val titles: Map<String, String> = emptyMap(),
-    /** One-shot alerts posted with a preview, newest last, so a title that arrives later can retitle them. */
-    val oneShots: Map<Pair<GatewayAlertKind, String>, Alert> = emptyMap(),
-) {
-    companion object {
-        const val MAX_TITLES = 32
-    }
-}
+/** What the app knows about one chat, keyed by its runtime id. */
+data class SessionFacts(val storedId: String? = null, val title: String? = null, val running: Boolean = false)
+
+/** One gateway event across sockets: the server stamps the same per-session seq on every copy of a frame. */
+data class EventMark(val sessionId: String, val seq: Long)
 
 data class WebappState(
     val settings: WebappBackgroundSettings,
     val visible: Boolean = true,
     /** Null while no gateway document is live in the WebView. */
-    val doc: GatewayDocument? = null,
+    val doc: DocId? = null,
+    /** Open server requests by the server's id, which is the same on the page's sockets and the monitor's. */
+    val prompts: Map<RpcId, OpenPrompt> = emptyMap(),
+    /** Requests answered or withdrawn, newest last, so a late copy from a slower socket cannot reopen one. */
+    val settled: List<RpcId> = emptyList(),
+    /** One-shot events already handled, newest last, so the second socket's copy does not alert again. */
+    val seen: List<EventMark> = emptyList(),
+    /** Runtime session id to its facts, newest last, bounded to [MAX_SESSIONS]. */
+    val sessions: Map<String, SessionFacts> = emptyMap(),
+    /** The chat the page last reported through `session.info`. */
+    val pageSession: String? = null,
+    /** One-shot alerts posted with a preview, newest last, so a title that arrives later can retitle them. */
+    val oneShots: Map<Pair<GatewayAlertKind, String>, Alert> = emptyMap(),
+    val monitor: MonitorState = MonitorState(),
     /** The session an alert tap asked to open, held until the app is visible. */
     val focus: String? = null,
-)
+) {
+    companion object {
+        const val MAX_SESSIONS = 32
+        const val MAX_RECENT = 64
+        const val MAX_WATCH = 8
+    }
+}
 
-data class AnswerTarget(val doc: DocId, val prompt: PromptKey)
+/** An open prompt a tray action answers. */
+data class AnswerTarget(val rpcId: RpcId)
+
+/** The socket an answer goes out on. */
+sealed interface AnswerRoute {
+    data class Page(val doc: DocId, val sock: Int) : AnswerRoute
+    data class Monitor(val gen: Int) : AnswerRoute
+}
 
 /** The tray actions an alert offers; each answers [target]. */
 sealed interface AlertActions {
@@ -145,7 +160,7 @@ enum class AlertReason { COMPLETE, ERROR, INTERRUPTED, APPROVAL, QUESTION, BACKG
 /** What the shell renders. The title and body are already removed when previews are off. */
 data class Alert(
     val kind: GatewayAlertKind,
-    /** Replaces per key: the session id for one-shot kinds, the encoded [PromptKey] for prompts. */
+    /** Replaces per key: the session id for one-shot kinds, the request id token for prompts. */
     val key: String,
     /** A tap asks the page to open this session. */
     val sessionId: String,
@@ -157,47 +172,77 @@ data class Alert(
     val actions: AlertActions?,
 )
 
-/** Inputs, already validated by the shell. Raw bridge text never reaches the reducer. */
+/** Inputs, already validated by the shell. Raw bridge and socket text never reaches the reducer. */
 sealed interface WebappInput {
-    /** A gateway document announced itself; a new id starts from a clean slate. */
+    /** A gateway document announced itself; a new id drops the old document's sockets. */
     data class Hello(val doc: DocId) : WebappInput
     data class Inbound(val doc: DocId, val sock: Int, val event: GatewayEvent) : WebappInput
     /** The page answered a request itself. */
     data class Responded(val doc: DocId, val sock: Int, val rpcId: RpcId) : WebappInput
     data class SocketClosed(val doc: DocId, val sock: Int) : WebappInput
-    data class SendResult(val doc: DocId, val prompt: PromptKey, val ok: Boolean) : WebappInput
+    /** Whether a tray answer reached its socket. */
+    data class SendResult(val rpcId: RpcId, val ok: Boolean) : WebappInput
     data class TrayAnswer(val target: AnswerTarget, val reply: TrayReply) : WebappInput
     data class Visibility(val visible: Boolean) : WebappInput
     data class SettingsChanged(val settings: WebappBackgroundSettings) : WebappInput
     /** An alert tap brought the app forward and names the session to open. */
     data class FocusRequested(val sessionId: String) : WebappInput
     data object DocumentGone : WebappInput
+    /** A different network became the default while keep-alive runs. */
+    data object NetworkChanged : WebappInput
+
+    /** A callback from the monitor's attempt [gen]. */
+    sealed interface MonitorInput : WebappInput {
+        val gen: Int
+    }
+
+    /** Null when the ticket could not be minted. */
+    data class TicketMinted(override val gen: Int, val ticket: String?) : MonitorInput {
+        override fun toString() = "TicketMinted(gen=$gen, ticket=${if (ticket == null) "null" else "…"})"
+    }
+    data class MonitorOpened(override val gen: Int) : MonitorInput
+    data class MonitorReceived(override val gen: Int, val frame: MonitorFrame) : MonitorInput
+    data class MonitorClosed(override val gen: Int) : MonitorInput
+    data class RetryDue(override val gen: Int) : MonitorInput
 }
 
 sealed interface WebappEffect {
     /** [update] replaces an alert already in the tray: silently, and only if it is still shown. */
     data class Post(val alert: Alert, val update: Boolean = false) : WebappEffect
     data class Cancel(val kind: GatewayAlertKind, val key: String) : WebappEffect
-    data class Send(val doc: DocId, val sock: Int, val prompt: PromptKey, val frame: String) : WebappEffect
+    /** Sends a tray answer; the shell reports [WebappInput.SendResult]. */
+    data class Answer(val rpcId: RpcId, val frame: String, val via: AnswerRoute) : WebappEffect
     data class KeepAlive(val on: Boolean) : WebappEffect
     /** Ask the live document to open a session; emitted only while visible. */
     data class FocusSession(val sessionId: String) : WebappEffect
+    data class MonitorMint(val gen: Int) : WebappEffect
+    data class MonitorDial(val gen: Int, val ticket: String) : WebappEffect {
+        override fun toString() = "MonitorDial(gen=$gen)"
+    }
+    data class MonitorSend(val gen: Int, val frame: String) : WebappEffect
+    /** Closes attempt [gen] and cancels anything it still has in flight. */
+    data class MonitorClose(val gen: Int) : WebappEffect
+    data class MonitorRetryAfter(val gen: Int, val delayMs: Long) : WebappEffect
 }
 
 /**
  * Every Webapp background decision, pure and total. Invariants (each pinned by a test):
  *  - Keep-alive is on exactly while the setting is on, the app is hidden and a gateway document is
- *    live. [WebappEffect.KeepAlive] is emitted only when that value changes.
- *  - Shown prompt notifications are exactly the open prompts that are not sending and whose kind
- *    is enabled, while hidden. Prompt posts and cancels come only from diffing that set before and
- *    after each input, so no path can leave a stale Allow/Deny in the tray.
- *  - One-shot alerts are posted only while hidden and enabled; a chat title that arrives later
- *    only updates them in place.
- *  - Only [WebappInput.Hello] changes the document; any other input naming another document is dropped.
+ *    live. [WebappEffect.KeepAlive] is emitted only when that value changes. The native monitor is
+ *    wanted exactly while keep-alive is on; it attaches to [watchSet].
+ *  - A prompt is one server request, keyed by the server's id, however many sockets delivered it.
+ *    It stays open while some route still reaches it; an answer, a page response, a withdrawal or the
+ *    monitor's attach snapshot settles it, and a settled id never reopens.
+ *  - Shown prompt notifications are exactly the open prompts that are not sending and whose kind is
+ *    enabled, while hidden. Prompt posts and cancels come only from diffing that set before and after
+ *    each input, so no path can leave a stale Allow/Deny in the tray.
+ *  - One-shot alerts are posted only while hidden and enabled, once per event: by the event's seq
+ *    when it has one, else only from the monitor for a session the monitor is attached to.
  *  - A send is emitted only for an open prompt that is not already sending, and only for a reply
  *    that matches what the prompt offers: a decision for an approval, a choice or text for a
  *    one-question, single-select clarify (choices for 1-[MAX_CHOICE_ACTIONS] choices, else text).
- *    A multi-question clarify is tap-only. Previews off hide clarify actions with the question.
+ *    It goes on the monitor when the monitor is live and delivered the prompt, else on a page socket
+ *    that delivered it. A multi-question clarify is tap-only. Previews off hide clarify actions.
  *  - A focus request is delivered at most once, only while visible and a document is live; a new
  *    document drops it.
  */
@@ -217,89 +262,161 @@ object WebappAlertReducer {
 
     fun reduce(state: WebappState, input: WebappInput): Pair<WebappState, List<WebappEffect>> {
         val (applied, actions) = apply(state, input)
-        val (next, focus) = deliverFocus(applied)
-        return next to (actions + diffPrompts(state, next) + keepAliveChange(state, next) + focus)
+        val (monitor, monitorEffects) = GatewayMonitorMachine.reconcile(applied.monitor, keepAlive(applied), watchSet(applied))
+        val stopped = monitor.phase == MonitorPhase.Idle && applied.monitor.phase != MonitorPhase.Idle
+        val reconciled = applied.copy(monitor = monitor).let { if (stopped) it.dropRoutes { route -> route == PromptRoute.Monitor } else it }
+        val (next, focus) = deliverFocus(reconciled)
+        return next to (actions + diffPrompts(state, next) + keepAliveChange(state, next) + monitorEffects + focus)
     }
 
     fun keepAlive(state: WebappState): Boolean = state.settings.keepAlive && !state.visible && state.doc != null
 
+    /**
+     * Stored ids the monitor attaches to: the page's current chat, chats with a running turn and chats
+     * with an open prompt, most urgent first. A chat whose stored id the app never learned is left to the page.
+     */
+    fun watchSet(state: WebappState): List<String> {
+        val prompted = state.prompts.values.mapTo(mutableSetOf()) { it.request.sessionId }
+        fun urgency(id: String, facts: SessionFacts) = when {
+            id in prompted -> 2
+            facts.running -> 1
+            else -> 0
+        }
+        return state.sessions.entries
+            .filter { (id, facts) -> facts.storedId != null && (id == state.pageSession || facts.running || id in prompted) }
+            .sortedByDescending { (id, facts) -> urgency(id, facts) }
+            .mapNotNull { it.value.storedId }
+            .distinct()
+            .take(WebappState.MAX_WATCH)
+    }
+
     fun promptAlerts(state: WebappState): Map<Pair<GatewayAlertKind, String>, Alert> {
-        val doc = state.doc ?: return emptyMap()
         if (state.visible) return emptyMap()
-        return doc.prompts
-            .filter { (_, prompt) -> !prompt.sending && state.settings.isEnabled(prompt.kind) }
-            .map { (key, prompt) -> promptAlert(state, doc, key, prompt) }
+        return state.prompts.values
+            .filter { prompt -> !prompt.sending && state.settings.isEnabled(prompt.kind) }
+            .map { promptAlert(state, it) }
             .associateBy { it.kind to it.key }
     }
 
     private fun apply(state: WebappState, input: WebappInput): Pair<WebappState, List<WebappEffect>> =
         when (input) {
-            is WebappInput.Visibility -> state.copy(visible = input.visible) to emptyList()
-            is WebappInput.SettingsChanged -> state.copy(settings = input.settings) to emptyList()
-            is WebappInput.FocusRequested -> state.copy(focus = input.sessionId) to emptyList()
-            WebappInput.DocumentGone -> state.copy(doc = null, focus = null) to emptyList()
+            is WebappInput.Visibility -> state.copy(visible = input.visible).alone()
+            is WebappInput.SettingsChanged -> state.copy(settings = input.settings).alone()
+            is WebappInput.FocusRequested -> state.copy(focus = input.sessionId).alone()
+            WebappInput.DocumentGone -> state.copy(doc = null, focus = null).dropRoutes { it is PromptRoute.Page }.alone()
             is WebappInput.Hello ->
-                (if (state.doc?.id == input.doc) state else state.copy(doc = GatewayDocument(input.doc), focus = null)) to emptyList()
-            is WebappInput.Inbound -> state.docFor(input.doc)
-                ?.let { inbound(state, it, input.sock, input.event) }
-                ?: (state to emptyList())
-            is WebappInput.Responded -> state.docFor(input.doc)
-                ?.let { state.withPrompts(it, it.prompts - PromptKey(input.sock, input.rpcId)) }
-                .orUnchanged(state)
-            is WebappInput.SocketClosed -> state.docFor(input.doc)
-                ?.let { doc -> state.withPrompts(doc, doc.prompts.filterKeys { it.sock != input.sock }) }
-                .orUnchanged(state)
-            is WebappInput.SendResult -> state.docFor(input.doc)?.let { doc ->
-                val prompt = doc.prompts[input.prompt] ?: return@let null
-                val prompts = if (input.ok) doc.prompts - input.prompt
-                else doc.prompts + (input.prompt to prompt.copy(sending = false))
-                state.withPrompts(doc, prompts)
-            }.orUnchanged(state)
+                (if (state.doc == input.doc) state
+                else state.copy(doc = input.doc, focus = null).dropRoutes { it is PromptRoute.Page }).alone()
+            is WebappInput.Inbound ->
+                if (state.doc != input.doc) state.alone() else inbound(state, PromptRoute.Page(input.sock), input.event)
+            is WebappInput.Responded ->
+                (if (state.doc != input.doc) state else state.settle(setOf(input.rpcId))).alone()
+            is WebappInput.SocketClosed ->
+                (if (state.doc != input.doc) state else state.dropRoutes { it == PromptRoute.Page(input.sock) }).alone()
+            is WebappInput.SendResult -> {
+                val prompt = state.prompts[input.rpcId]
+                when {
+                    prompt == null -> state
+                    input.ok -> state.settle(setOf(input.rpcId))
+                    else -> state.copy(prompts = state.prompts + (input.rpcId to prompt.copy(sending = false)))
+                }.alone()
+            }
             is WebappInput.TrayAnswer -> trayAnswer(state, input)
+            WebappInput.NetworkChanged -> GatewayMonitorMachine.networkChanged(state.monitor).let { (monitor, effects) ->
+                state.copy(monitor = monitor) to effects
+            }
+            is WebappInput.MonitorInput -> monitorInput(state, input)
         }
 
-    private fun inbound(
-        state: WebappState,
-        doc: GatewayDocument,
-        sock: Int,
-        event: GatewayEvent,
-    ): Pair<WebappState, List<WebappEffect>> = when (event) {
-        is GatewayEvent.PromptRequest ->
-            state.withPrompts(doc, doc.prompts + (PromptKey(sock, event.rpcId) to OpenPrompt(event))) to emptyList()
-        is GatewayEvent.ApprovalCancelled -> {
-            val remaining = doc.prompts.filterValues { prompt ->
-                val request = prompt.request
-                !(request is GatewayEvent.ApprovalRequested && request.sessionId == event.sessionId &&
-                    (event.requestIds.isEmpty() || request.requestId in event.requestIds))
-            }
-            state.withPrompts(doc, remaining) to emptyList()
-        }
-        is GatewayEvent.SessionTitled -> {
-            val titles = (doc.titles - event.sessionId + (event.sessionId to event.title)).newest()
-            val retitled = doc.oneShots.filterValues { it.sessionId == event.sessionId && it.title != event.title }
-                .mapValues { (_, alert) -> alert.copy(title = event.title) }
-                .takeIf { state.settings.showPreview }.orEmpty()
-            state.copy(doc = doc.copy(titles = titles, oneShots = doc.oneShots + retitled)) to
-                retitled.values.map { WebappEffect.Post(it, update = true) }
-        }
-        is GatewayEvent.TurnEnded, is GatewayEvent.BackgroundCompleted -> {
-            val alert = oneShotAlert(state, doc, event)
-            val oneShots = if (alert == null || !state.settings.showPreview) doc.oneShots
-            else (doc.oneShots - (alert.kind to alert.key) + ((alert.kind to alert.key) to alert)).newest()
-            state.copy(doc = doc.copy(oneShots = oneShots)) to listOfNotNull(alert?.let(WebappEffect::Post))
+    private fun monitorInput(state: WebappState, input: WebappInput.MonitorInput): Pair<WebappState, List<WebappEffect>> {
+        val frame = (input as? WebappInput.MonitorReceived)?.frame
+        val current = input.gen == state.monitor.gen && state.monitor.live != null
+        return when {
+            frame is MonitorFrame.Inbound -> if (current) inbound(state, PromptRoute.Monitor, frame.event) else state.alone()
+            frame is MonitorFrame.Resumed -> if (current) resumed(state, frame.requestId, frame.snapshot) else state.alone()
+            else -> GatewayMonitorMachine.step(state.monitor, input).let { (monitor, effects) -> state.copy(monitor = monitor) to effects }
         }
     }
 
-    private fun <K, V> Map<K, V>.newest(): Map<K, V> =
-        entries.toList().takeLast(GatewayDocument.MAX_TITLES).associate { it.key to it.value }
+    private fun inbound(state: WebappState, route: PromptRoute, event: GatewayEvent): Pair<WebappState, List<WebappEffect>> =
+        when (event) {
+            is GatewayEvent.PromptRequest -> state.open(event, route).alone()
+            is GatewayEvent.ApprovalCancelled -> state.settle(
+                state.prompts.filterValues { prompt ->
+                    val request = prompt.request
+                    request is GatewayEvent.ApprovalRequested && request.sessionId == event.sessionId &&
+                        (event.requestIds.isEmpty() || request.requestId in event.requestIds)
+                }.keys
+            ).alone()
+            is GatewayEvent.RequestCancelled -> state.settle(setOf(event.rpcId)).alone()
+            is GatewayEvent.SessionTitled -> learn(state, event.sessionId, event.title) { it }
+            is GatewayEvent.SessionInfo -> learn(state, event.sessionId, event.title) { facts ->
+                facts.copy(storedId = event.storedId ?: facts.storedId, running = event.running ?: facts.running)
+            }.let { (next, effects) -> (if (route is PromptRoute.Page) next.copy(pageSession = event.sessionId) else next) to effects }
+            is GatewayEvent.TurnEnded -> learn(state, event.sessionId, null) { it.copy(running = false) }
+                .let { (next, _) -> oneShot(next, route, event, event.seq) }
+            is GatewayEvent.BackgroundCompleted -> oneShot(state, route, event, event.seq)
+        }
+
+    /** Applies the monitor's attach snapshot: the session's facts and every request still open in it. */
+    private fun resumed(state: WebappState, requestId: Int, snapshot: ResumeSnapshot?): Pair<WebappState, List<WebappEffect>> {
+        val (monitor, stored) = GatewayMonitorMachine.resumed(state.monitor, requestId, snapshot)
+        if (stored == null || snapshot == null) return state.copy(monitor = monitor).alone()
+        val (learned, effects) = learn(state.copy(monitor = monitor), snapshot.runtimeId, snapshot.title) {
+            it.copy(storedId = snapshot.storedId, running = snapshot.running)
+        }
+        // Only prompts the monitor alone was keeping are dropped: one the page delivered after the
+        // snapshot was taken may not be in it yet.
+        val open = snapshot.openRequests.mapTo(mutableSetOf()) { it.rpcId }
+        val stale = learned.prompts.filterValues {
+            it.request.sessionId == snapshot.runtimeId && it.routes == setOf(PromptRoute.Monitor) && it.request.rpcId !in open
+        }
+        val next = snapshot.openRequests.fold(learned.copy(prompts = learned.prompts - stale.keys)) { acc, request ->
+            acc.open(request, PromptRoute.Monitor)
+        }
+        return next to effects
+    }
+
+    /** Updates a session's facts; a new non-blank [title] also retitles its shown one-shot alerts in place. */
+    private fun learn(
+        state: WebappState,
+        sessionId: String,
+        title: String?,
+        update: (SessionFacts) -> SessionFacts,
+    ): Pair<WebappState, List<WebappEffect>> {
+        val known = state.sessions[sessionId] ?: SessionFacts()
+        val facts = update(known).let { if (title.isNullOrBlank()) it else it.copy(title = title) }
+        val sessions = (state.sessions - sessionId + (sessionId to facts)).newest(WebappState.MAX_SESSIONS)
+        val retitled = if (title.isNullOrBlank() || !state.settings.showPreview) emptyMap()
+        else state.oneShots.filterValues { it.sessionId == sessionId && it.title != title }.mapValues { (_, alert) -> alert.copy(title = title) }
+        return state.copy(sessions = sessions, oneShots = state.oneShots + retitled) to
+            retitled.values.map { WebappEffect.Post(it, update = true) }
+    }
+
+    private fun oneShot(state: WebappState, route: PromptRoute, event: GatewayEvent, seq: Long?): Pair<WebappState, List<WebappEffect>> {
+        val mark = seq?.let { EventMark(event.sessionId, it) }
+        if (mark != null && mark in state.seen) return state.alone()
+        if (mark == null && route is PromptRoute.Page && state.monitor.covers(event.sessionId)) return state.alone()
+        val seen = if (mark == null) state.seen else (state.seen + mark).takeLast(WebappState.MAX_RECENT)
+        val alert = oneShotAlert(state, event)
+        val oneShots = if (alert == null || !state.settings.showPreview) state.oneShots
+        else (state.oneShots - (alert.kind to alert.key) + ((alert.kind to alert.key) to alert)).newest(WebappState.MAX_SESSIONS)
+        return state.copy(seen = seen, oneShots = oneShots) to listOfNotNull(alert?.let(WebappEffect::Post))
+    }
 
     private fun trayAnswer(state: WebappState, input: WebappInput.TrayAnswer): Pair<WebappState, List<WebappEffect>> {
-        val doc = state.docFor(input.target.doc) ?: return state to emptyList()
-        val key = input.target.prompt
-        val prompt = doc.prompts[key]?.takeUnless { it.sending } ?: return state to emptyList()
-        val frame = answerFrame(prompt.request, input.reply) ?: return state to emptyList()
-        val send = WebappEffect.Send(doc.id, key.sock, key, frame)
-        return state.withPrompts(doc, doc.prompts + (key to prompt.copy(sending = true))) to listOf(send)
+        val rpcId = input.target.rpcId
+        val prompt = state.prompts[rpcId]?.takeUnless { it.sending } ?: return state.alone()
+        val frame = answerFrame(prompt.request, input.reply) ?: return state.alone()
+        val route = answerRoute(state, prompt) ?: return state.alone()
+        return state.copy(prompts = state.prompts + (rpcId to prompt.copy(sending = true))) to
+            listOf(WebappEffect.Answer(rpcId, frame, route))
+    }
+
+    private fun answerRoute(state: WebappState, prompt: OpenPrompt): AnswerRoute? {
+        if (state.monitor.live != null && PromptRoute.Monitor in prompt.routes) return AnswerRoute.Monitor(state.monitor.gen)
+        val doc = state.doc ?: return null
+        return prompt.routes.filterIsInstance<PromptRoute.Page>().minByOrNull { it.sock }?.let { AnswerRoute.Page(doc, it.sock) }
     }
 
     private fun answerFrame(request: GatewayEvent.PromptRequest, reply: TrayReply): String? = when (request) {
@@ -340,7 +457,7 @@ object WebappAlertReducer {
         return (listOfNotNull(question.question) + listed.map { "• $it" }).joinToString("\n").ifEmpty { null }
     }
 
-    private fun oneShotAlert(state: WebappState, doc: GatewayDocument, event: GatewayEvent): Alert? {
+    private fun oneShotAlert(state: WebappState, event: GatewayEvent): Alert? {
         val (kind, reason, detail) = when (event) {
             is GatewayEvent.TurnEnded -> when (event.outcome) {
                 TurnOutcome.COMPLETE -> Triple(GatewayAlertKind.TURN_COMPLETE, AlertReason.COMPLETE, event.text)
@@ -352,27 +469,26 @@ object WebappAlertReducer {
             else -> return null
         }
         if (state.visible || !state.settings.isEnabled(kind)) return null
-        return alert(state, doc, kind, event.sessionId, event.sessionId, reason, detail, actions = null)
+        return alert(state, kind, event.sessionId, event.sessionId, reason, detail, actions = null)
     }
 
-    private fun promptAlert(state: WebappState, doc: GatewayDocument, key: PromptKey, prompt: OpenPrompt): Alert {
-        val encoded = key.encode()
-        return when (val request = prompt.request) {
+    private fun promptAlert(state: WebappState, prompt: OpenPrompt): Alert {
+        val request = prompt.request
+        val target = AnswerTarget(request.rpcId)
+        return when (request) {
             is GatewayEvent.ApprovalRequested -> alert(
-                state, doc, GatewayAlertKind.APPROVAL, encoded, request.sessionId, AlertReason.APPROVAL,
-                request.command ?: request.description ?: request.toolName,
-                AlertActions.Decide(AnswerTarget(doc.id, key)),
+                state, GatewayAlertKind.APPROVAL, request.rpcId.json, request.sessionId, AlertReason.APPROVAL,
+                request.command ?: request.description ?: request.toolName, AlertActions.Decide(target),
             )
             is GatewayEvent.ClarifyRequested -> alert(
-                state, doc, GatewayAlertKind.CLARIFY, encoded, request.sessionId, AlertReason.QUESTION,
-                clarifyDetail(request), clarifyActions(state, request, AnswerTarget(doc.id, key)),
+                state, GatewayAlertKind.CLARIFY, request.rpcId.json, request.sessionId, AlertReason.QUESTION,
+                clarifyDetail(request), clarifyActions(state, request, target),
             )
         }
     }
 
     private fun alert(
         state: WebappState,
-        doc: GatewayDocument,
         kind: GatewayAlertKind,
         key: String,
         sessionId: String,
@@ -386,7 +502,7 @@ object WebappAlertReducer {
             key = key,
             sessionId = sessionId,
             reason = reason,
-            title = alertTitle(doc.titles[sessionId], detail, preview),
+            title = alertTitle(state.sessions[sessionId]?.title, detail, preview),
             body = detail?.takeIf { preview }?.trim()?.take(MAX_DETAIL)?.ifEmpty { null },
             actions = actions,
         )
@@ -413,13 +529,30 @@ object WebappAlertReducer {
         return if (keepAlive(before) == on) emptyList() else listOf(WebappEffect.KeepAlive(on))
     }
 
-    private fun WebappState.docFor(id: DocId): GatewayDocument? = doc?.takeIf { it.id == id }
+    /** Adds [route] to an open prompt, or opens it; a settled request stays closed. */
+    private fun WebappState.open(request: GatewayEvent.PromptRequest, route: PromptRoute): WebappState {
+        if (request.rpcId in settled) return this
+        val prompt = prompts[request.rpcId]?.let { it.copy(routes = it.routes + route) } ?: OpenPrompt(request, setOf(route))
+        return copy(prompts = prompts + (request.rpcId to prompt))
+    }
 
-    private fun WebappState.withPrompts(doc: GatewayDocument, prompts: Map<PromptKey, OpenPrompt>) =
-        copy(doc = doc.copy(prompts = prompts))
+    private fun WebappState.settle(ids: Set<RpcId>): WebappState {
+        if (ids.isEmpty()) return this
+        return copy(prompts = prompts - ids, settled = (settled - ids + ids).takeLast(WebappState.MAX_RECENT))
+    }
 
-    private fun WebappState?.orUnchanged(state: WebappState): Pair<WebappState, List<WebappEffect>> =
-        (this ?: state) to emptyList()
+    /** Removes routes that no longer reach the server; a prompt left without any is dropped, not settled. */
+    private fun WebappState.dropRoutes(gone: (PromptRoute) -> Boolean): WebappState =
+        copy(
+            prompts = prompts
+                .mapValues { (_, prompt) -> prompt.copy(routes = prompt.routes.filterNotTo(mutableSetOf(), gone)) }
+                .filterValues { it.routes.isNotEmpty() }
+        )
+
+    private fun <K, V> Map<K, V>.newest(max: Int): Map<K, V> =
+        if (size <= max) this else entries.toList().takeLast(max).associate { it.key to it.value }
+
+    private fun WebappState.alone(): Pair<WebappState, List<WebappEffect>> = this to emptyList()
 }
 
 /** Parses the tap's bridge envelope into a [WebappInput]. Anything malformed is null. */
@@ -435,7 +568,7 @@ object WebappBridgeEnvelope {
             ?: return null
         val sock = (message.opt("sock") as? Int)?.takeIf { it > 0 }
         val frame = message.opt("data") as? String
-        val key = (message.opt("key") as? String)?.let(PromptKey::decode)
+        val key = (message.opt("key") as? String)?.let(RpcId::fromToken)
         return when (message.opt("t")) {
             "hello" -> WebappInput.Hello(doc)
             "in" -> if (sock == null || frame == null) null
@@ -443,8 +576,8 @@ object WebappBridgeEnvelope {
             "out" -> if (sock == null || frame == null) null
                 else GatewayProtocol.parseResponseId(frame)?.let { WebappInput.Responded(doc, sock, it) }
             "close" -> sock?.let { WebappInput.SocketClosed(doc, it) }
-            "sent" -> key?.let { WebappInput.SendResult(doc, it, ok = true) }
-            "sendFailed" -> key?.let { WebappInput.SendResult(doc, it, ok = false) }
+            "sent" -> key?.let { WebappInput.SendResult(it, ok = true) }
+            "sendFailed" -> key?.let { WebappInput.SendResult(it, ok = false) }
             else -> null
         }
     }

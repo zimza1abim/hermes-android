@@ -6,7 +6,7 @@ import com.hermeswebui.android.webapp.WebappEffect.Cancel
 import com.hermeswebui.android.webapp.WebappEffect.FocusSession
 import com.hermeswebui.android.webapp.WebappEffect.KeepAlive
 import com.hermeswebui.android.webapp.WebappEffect.Post
-import com.hermeswebui.android.webapp.WebappEffect.Send
+import com.hermeswebui.android.webapp.WebappEffect.Answer
 import com.hermeswebui.android.webapp.WebappInput.DocumentGone
 import com.hermeswebui.android.webapp.WebappInput.FocusRequested
 import com.hermeswebui.android.webapp.WebappInput.Hello
@@ -22,12 +22,13 @@ import org.junit.Test
 class WebappAlertReducerTest {
     private val doc = DocId("doc-a")
     private val approvalId = RpcId.fromToken("7")!!
-    private val approvalKey = PromptKey(1, approvalId)
+    private val approvalKey = approvalId.json
     private val approval = GatewayEvent.ApprovalRequested(
         "s1", approvalId, "r1", "rm -rf build", "Delete build output", "terminal", ApprovalChoice.entries,
     )
-    private val clarifyKey = PromptKey(1, RpcId.fromToken("9")!!)
-    private val clarify = GatewayEvent.ClarifyRequested("s1", clarifyKey.rpcId, listOf(ClarifyQuestion("q1", "Which branch?")))
+    private val clarifyId = RpcId.fromToken("9")!!
+    private val clarifyKey = clarifyId.json
+    private val clarify = GatewayEvent.ClarifyRequested("s1", clarifyId, listOf(ClarifyQuestion("q1", "Which branch?")))
     private val completed = GatewayEvent.TurnEnded("s1", TurnOutcome.COMPLETE, "All done", null)
 
     /** Runs inputs in order and returns the final state plus the effects of the last input. */
@@ -41,7 +42,11 @@ class WebappAlertReducerTest {
         return state to last
     }
 
-    private fun effectsOf(vararg inputs: WebappInput) = run(*inputs).second
+    /** The last input's effects, without the monitor's connection effects (pinned in GatewayMonitorTest). */
+    private fun effectsOf(vararg inputs: WebappInput) = run(*inputs).second.filterNot { it.isMonitorEffect() }
+
+    private fun WebappEffect.isMonitorEffect() = this is WebappEffect.MonitorMint || this is WebappEffect.MonitorDial ||
+        this is WebappEffect.MonitorSend || this is WebappEffect.MonitorClose || this is WebappEffect.MonitorRetryAfter
 
     private fun allEffects(vararg inputs: WebappInput): List<WebappEffect> {
         var state = WebappState(WebappBackgroundSettings())
@@ -53,7 +58,9 @@ class WebappAlertReducerTest {
     @Test
     fun `keep-alive runs only while enabled, hidden and a gateway document is live`() {
         assertThat(effectsOf(Visibility(false))).isEmpty()
-        assertThat(effectsOf(Hello(doc), Visibility(false))).containsExactly(KeepAlive(true))
+        assertThat(run(Hello(doc), Visibility(false)).second).containsExactly(KeepAlive(true), WebappEffect.MonitorMint(1))
+        assertThat(run(Hello(doc), Visibility(false), Visibility(true)).second)
+            .containsExactly(KeepAlive(false), WebappEffect.MonitorClose(1))
         assertThat(effectsOf(Visibility(false), Hello(doc))).containsExactly(KeepAlive(true))
         assertThat(effectsOf(*hidden, Visibility(true))).containsExactly(KeepAlive(false))
         assertThat(effectsOf(*hidden, DocumentGone)).containsExactly(KeepAlive(false))
@@ -131,8 +138,8 @@ class WebappAlertReducerTest {
             Post(Alert(GatewayAlertKind.TURN_COMPLETE, "s1", "s1", AlertReason.COMPLETE, "Fix the build", "All done", null), update = true),
             Post(
                 Alert(
-                    GatewayAlertKind.APPROVAL, approvalKey.encode(), "s1", AlertReason.APPROVAL, "Fix the build",
-                    "rm -rf build", AlertActions.Decide(AnswerTarget(doc, approvalKey)),
+                    GatewayAlertKind.APPROVAL, approvalKey, "s1", AlertReason.APPROVAL, "Fix the build",
+                    "rm -rf build", AlertActions.Decide(AnswerTarget(approvalId)),
                 ),
                 update = true,
             ),
@@ -141,8 +148,6 @@ class WebappAlertReducerTest {
         assertThat(effectsOf(*hidden, Inbound(doc, 1, completed), Inbound(doc, 1, GatewayEvent.SessionTitled("s2", "Other")))).isEmpty()
         val noPreview = SettingsChanged(WebappBackgroundSettings(showPreview = false))
         assertThat(effectsOf(*hidden, noPreview, Inbound(doc, 1, completed), titled)).isEmpty()
-        assertThat(effectsOf(*hidden, Inbound(doc, 1, completed), Hello(DocId("doc-b")), Visibility(false),
-            Inbound(DocId("doc-b"), 1, GatewayEvent.SessionTitled("s1", "Fix the build")))).isEmpty()
     }
 
     @Test
@@ -155,11 +160,11 @@ class WebappAlertReducerTest {
     fun `an approval shows with an answer target while hidden`() {
         val alert = (effectsOf(*hidden, Inbound(doc, 1, approval)).single() as Post).alert
         assertThat(alert).isEqualTo(
-            Alert(GatewayAlertKind.APPROVAL, approvalKey.encode(), "s1", AlertReason.APPROVAL, "rm -rf build", "rm -rf build", AlertActions.Decide(AnswerTarget(doc, approvalKey)))
+            Alert(GatewayAlertKind.APPROVAL, approvalKey, "s1", AlertReason.APPROVAL, "rm -rf build", "rm -rf build", AlertActions.Decide(AnswerTarget(approvalId)))
         )
         val question = (effectsOf(*hidden, Inbound(doc, 1, clarify)).single() as Post).alert
         assertThat(question).isEqualTo(
-            Alert(GatewayAlertKind.CLARIFY, clarifyKey.encode(), "s1", AlertReason.QUESTION, "Which branch?", "Which branch?", AlertActions.Reply(AnswerTarget(doc, clarifyKey)))
+            Alert(GatewayAlertKind.CLARIFY, clarifyKey, "s1", AlertReason.QUESTION, "Which branch?", "Which branch?", AlertActions.Reply(AnswerTarget(clarifyId)))
         )
     }
 
@@ -167,9 +172,9 @@ class WebappAlertReducerTest {
     fun `return cancels open prompts and leaving again re-posts them`() {
         val open = arrayOf(*hidden, Inbound(doc, 1, approval))
         assertThat(effectsOf(*open, Visibility(true)))
-            .containsExactly(Cancel(GatewayAlertKind.APPROVAL, approvalKey.encode()), KeepAlive(false))
+            .containsExactly(Cancel(GatewayAlertKind.APPROVAL, approvalKey), KeepAlive(false))
         val again = effectsOf(*open, Visibility(true), Visibility(false))
-        assertThat(again.filterIsInstance<Post>().single().alert.actions).isEqualTo(AlertActions.Decide(AnswerTarget(doc, approvalKey)))
+        assertThat(again.filterIsInstance<Post>().single().alert.actions).isEqualTo(AlertActions.Decide(AnswerTarget(approvalId)))
     }
 
     @Test
@@ -180,31 +185,31 @@ class WebappAlertReducerTest {
 
     @Test
     fun `tray allow sends the encoded answer and hides the prompt`() {
-        val effects = effectsOf(*hidden, Inbound(doc, 1, approval), TrayAnswer(AnswerTarget(doc, approvalKey), TrayReply.Decide(Decision.ALLOW)))
+        val effects = effectsOf(*hidden, Inbound(doc, 1, approval), TrayAnswer(AnswerTarget(approvalId), TrayReply.Decide(Decision.ALLOW)))
         assertThat(effects).containsExactly(
-            Send(doc, 1, approvalKey, GatewayProtocol.encodeApprovalAnswer(approvalId, ApprovalChoice.ONCE)),
-            Cancel(GatewayAlertKind.APPROVAL, approvalKey.encode()),
+            Answer(approvalId, GatewayProtocol.encodeApprovalAnswer(approvalId, ApprovalChoice.ONCE), AnswerRoute.Page(doc, 1)),
+            Cancel(GatewayAlertKind.APPROVAL, approvalKey),
         ).inOrder()
     }
 
     @Test
     fun `a failed send re-posts the prompt and a successful one forgets it`() {
-        val sending = arrayOf(*hidden, Inbound(doc, 1, approval), TrayAnswer(AnswerTarget(doc, approvalKey), TrayReply.Decide(Decision.DENY)))
-        assertThat(effectsOf(*sending, SendResult(doc, approvalKey, ok = false)).single()).isInstanceOf(Post::class.java)
-        val (state, effects) = run(*sending, SendResult(doc, approvalKey, ok = true))
+        val sending = arrayOf(*hidden, Inbound(doc, 1, approval), TrayAnswer(AnswerTarget(approvalId), TrayReply.Decide(Decision.DENY)))
+        assertThat(effectsOf(*sending, SendResult(approvalId, ok = false)).single()).isInstanceOf(Post::class.java)
+        val (state, effects) = run(*sending, SendResult(approvalId, ok = true))
         assertThat(effects).isEmpty()
-        assertThat(state.doc!!.prompts).isEmpty()
+        assertThat(state.prompts).isEmpty()
     }
 
     @Test
     fun `a prompt already sending is not sent twice`() {
-        val target = AnswerTarget(doc, approvalKey)
+        val target = AnswerTarget(approvalId)
         assertThat(effectsOf(*hidden, Inbound(doc, 1, approval), TrayAnswer(target, TrayReply.Decide(Decision.ALLOW)), TrayAnswer(target, TrayReply.Decide(Decision.DENY))))
             .isEmpty()
     }
 
     private fun clarifyWith(vararg questions: ClarifyQuestion) =
-        GatewayEvent.ClarifyRequested("s1", clarifyKey.rpcId, questions.toList())
+        GatewayEvent.ClarifyRequested("s1", clarifyId, questions.toList())
 
     private fun clarifyActions(request: GatewayEvent.ClarifyRequested, settings: WebappBackgroundSettings = WebappBackgroundSettings()) =
         (run(Hello(doc), SettingsChanged(settings), Visibility(false), Inbound(doc, 1, request)).second
@@ -212,7 +217,7 @@ class WebappAlertReducerTest {
 
     @Test
     fun `a one-question clarify offers a button per choice up to three, else a reply`() {
-        val target = AnswerTarget(doc, clarifyKey)
+        val target = AnswerTarget(clarifyId)
         assertThat(clarifyActions(clarifyWith(ClarifyQuestion("q1", "Pick", listOf("a", "b", "c")))))
             .isEqualTo(AlertActions.Choose(target, listOf("a", "b", "c")))
         assertThat(clarifyActions(clarifyWith(ClarifyQuestion("q1", "Pick", listOf("a")))))
@@ -241,23 +246,23 @@ class WebappAlertReducerTest {
 
     @Test
     fun `a tray choice or reply sends the clarify answer and hides the prompt`() {
-        val target = AnswerTarget(doc, clarifyKey)
+        val target = AnswerTarget(clarifyId)
         val choices = clarifyWith(ClarifyQuestion("q1", "Pick", listOf("main", "dev")))
         assertThat(effectsOf(*hidden, Inbound(doc, 1, choices), TrayAnswer(target, TrayReply.Choose(1)))).containsExactly(
-            Send(doc, 1, clarifyKey, GatewayProtocol.encodeClarifyAnswer(clarifyKey.rpcId, "q1", "dev")),
-            Cancel(GatewayAlertKind.CLARIFY, clarifyKey.encode()),
+            Answer(clarifyId, GatewayProtocol.encodeClarifyAnswer(clarifyId, "q1", "dev"), AnswerRoute.Page(doc, 1)),
+            Cancel(GatewayAlertKind.CLARIFY, clarifyKey),
         ).inOrder()
         assertThat(effectsOf(*hidden, Inbound(doc, 1, clarify), TrayAnswer(target, TrayReply.Reply("  feature/x \n"))).first())
-            .isEqualTo(Send(doc, 1, clarifyKey, GatewayProtocol.encodeClarifyAnswer(clarifyKey.rpcId, "q1", "feature/x")))
+            .isEqualTo(Answer(clarifyId, GatewayProtocol.encodeClarifyAnswer(clarifyId, "q1", "feature/x"), AnswerRoute.Page(doc, 1)))
         val failed = effectsOf(
-            *hidden, Inbound(doc, 1, clarify), TrayAnswer(target, TrayReply.Reply("x")), SendResult(doc, clarifyKey, ok = false),
+            *hidden, Inbound(doc, 1, clarify), TrayAnswer(target, TrayReply.Reply("x")), SendResult(clarifyId, ok = false),
         )
         assertThat((failed.single() as Post).alert.actions).isEqualTo(AlertActions.Reply(target))
     }
 
     @Test
     fun `tray replies that do not match the prompt's actions are dropped`() {
-        val target = AnswerTarget(doc, clarifyKey)
+        val target = AnswerTarget(clarifyId)
         val choices = clarifyWith(ClarifyQuestion("q1", "Pick", listOf("main", "dev")))
         val two = clarifyWith(ClarifyQuestion("q1", "One"), ClarifyQuestion("q2", "Two"))
         listOf(
@@ -272,28 +277,30 @@ class WebappAlertReducerTest {
             assertWithMessage("$reply").that(effectsOf(*hidden, Inbound(doc, 1, request), TrayAnswer(target, reply))).isEmpty()
         }
         assertThat(
-            effectsOf(*hidden, Inbound(doc, 1, approval), TrayAnswer(AnswerTarget(doc, approvalKey), TrayReply.Choose(0)))
+            effectsOf(*hidden, Inbound(doc, 1, approval), TrayAnswer(AnswerTarget(approvalId), TrayReply.Choose(0)))
         ).isEmpty()
     }
 
     @Test
     fun `the page answering a prompt itself cancels it`() {
         assertThat(effectsOf(*hidden, Inbound(doc, 1, approval), Responded(doc, 1, approvalId)))
-            .containsExactly(Cancel(GatewayAlertKind.APPROVAL, approvalKey.encode()))
-        assertThat(effectsOf(*hidden, Inbound(doc, 1, approval), Responded(doc, 2, approvalId))).isEmpty()
+            .containsExactly(Cancel(GatewayAlertKind.APPROVAL, approvalKey))
+        assertThat(effectsOf(*hidden, Inbound(doc, 1, approval), Responded(doc, 2, approvalId)))
+            .containsExactly(Cancel(GatewayAlertKind.APPROVAL, approvalKey))
+        assertThat(effectsOf(*hidden, Inbound(doc, 1, approval), Responded(doc, 1, approvalId), Inbound(doc, 1, approval))).isEmpty()
     }
 
     @Test
     fun `approval cancelled withdraws matching approvals only`() {
         val other = GatewayEvent.ApprovalRequested("s1", RpcId.fromToken("8")!!, "r2", "ls", null, null, ApprovalChoice.entries)
-        val otherKey = PromptKey(1, other.rpcId)
+        val otherKey = other.rpcId.json
         val open = arrayOf(*hidden, Inbound(doc, 1, approval), Inbound(doc, 1, other), Inbound(doc, 1, clarify))
         assertThat(effectsOf(*open, Inbound(doc, 1, GatewayEvent.ApprovalCancelled("s1", setOf("r1")))))
-            .containsExactly(Cancel(GatewayAlertKind.APPROVAL, approvalKey.encode()))
+            .containsExactly(Cancel(GatewayAlertKind.APPROVAL, approvalKey))
         assertThat(effectsOf(*open, Inbound(doc, 1, GatewayEvent.ApprovalCancelled("s1", emptySet()))))
             .containsExactly(
-                Cancel(GatewayAlertKind.APPROVAL, approvalKey.encode()),
-                Cancel(GatewayAlertKind.APPROVAL, otherKey.encode()),
+                Cancel(GatewayAlertKind.APPROVAL, approvalKey),
+                Cancel(GatewayAlertKind.APPROVAL, otherKey),
             )
         assertThat(effectsOf(*open, Inbound(doc, 1, GatewayEvent.ApprovalCancelled("s9", emptySet())))).isEmpty()
     }
@@ -301,18 +308,18 @@ class WebappAlertReducerTest {
     @Test
     fun `a closed socket cancels its prompts`() {
         assertThat(effectsOf(*hidden, Inbound(doc, 1, approval), Inbound(doc, 2, clarify), SocketClosed(doc, 1)))
-            .containsExactly(Cancel(GatewayAlertKind.APPROVAL, approvalKey.encode()))
+            .containsExactly(Cancel(GatewayAlertKind.APPROVAL, approvalKey))
     }
 
     @Test
     fun `a new document cancels the old prompts and stale answers are dropped`() {
         val docB = DocId("doc-b")
         val open = arrayOf(*hidden, Inbound(doc, 1, approval))
-        assertThat(effectsOf(*open, Hello(docB))).containsExactly(Cancel(GatewayAlertKind.APPROVAL, approvalKey.encode()))
-        assertThat(effectsOf(*open, Hello(docB), TrayAnswer(AnswerTarget(doc, approvalKey), TrayReply.Decide(Decision.ALLOW)))).isEmpty()
+        assertThat(effectsOf(*open, Hello(docB))).containsExactly(Cancel(GatewayAlertKind.APPROVAL, approvalKey))
+        assertThat(effectsOf(*open, Hello(docB), TrayAnswer(AnswerTarget(approvalId), TrayReply.Decide(Decision.ALLOW)))).isEmpty()
         assertThat(effectsOf(*open, Hello(docB), Inbound(doc, 1, completed))).isEmpty()
         assertThat(effectsOf(*open, DocumentGone))
-            .containsExactly(Cancel(GatewayAlertKind.APPROVAL, approvalKey.encode()), KeepAlive(false))
+            .containsExactly(Cancel(GatewayAlertKind.APPROVAL, approvalKey), KeepAlive(false))
         assertThat(effectsOf(*open, DocumentGone, Inbound(doc, 1, approval))).isEmpty()
     }
 
@@ -320,7 +327,7 @@ class WebappAlertReducerTest {
     fun `disabling a kind cancels its live prompts and enabling restores them`() {
         val off = SettingsChanged(WebappBackgroundSettings(disabled = setOf(GatewayAlertKind.APPROVAL)))
         assertThat(effectsOf(*hidden, Inbound(doc, 1, approval), off))
-            .containsExactly(Cancel(GatewayAlertKind.APPROVAL, approvalKey.encode()))
+            .containsExactly(Cancel(GatewayAlertKind.APPROVAL, approvalKey))
         assertThat(effectsOf(*hidden, Inbound(doc, 1, approval), off, SettingsChanged(WebappBackgroundSettings())).single())
             .isInstanceOf(Post::class.java)
     }
@@ -359,9 +366,9 @@ class WebappAlertReducerTest {
     fun `session titles stay bounded`() {
         val inputs = (1..40).map { Inbound(doc, 1, GatewayEvent.SessionTitled("s$it", "t$it")) }
         val state = run(Hello(doc), *inputs.toTypedArray()).first
-        assertThat(state.doc!!.titles).hasSize(GatewayDocument.MAX_TITLES)
-        assertThat(state.doc!!.titles).containsKey("s40")
-        assertThat(state.doc!!.titles).doesNotContainKey("s1")
+        assertThat(state.sessions).hasSize(WebappState.MAX_SESSIONS)
+        assertThat(state.sessions).containsKey("s40")
+        assertThat(state.sessions).doesNotContainKey("s1")
     }
 
     @Test
@@ -382,13 +389,5 @@ class WebappAlertReducerTest {
         assertThat(WebappBackgroundSettings.disabledFromStorage(setOf("approval", "from_the_future")))
             .containsExactly(GatewayAlertKind.APPROVAL)
         assertThat(WebappBackgroundSettings.disabledFromStorage(null)).isEmpty()
-    }
-
-    @Test
-    fun `prompt keys round trip and reject malformed text`() {
-        listOf(approvalKey, PromptKey(3, RpcId.fromToken("\"a|b\"")!!)).forEach {
-            assertThat(PromptKey.decode(it.encode())).isEqualTo(it)
-        }
-        listOf("", "|7", "0|7", "x|7", "1|", "1|1.5", "17").forEach { assertThat(PromptKey.decode(it)).isNull() }
     }
 }

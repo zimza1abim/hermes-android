@@ -17,6 +17,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.service.notification.StatusBarNotification
+import android.webkit.CookieManager
 import android.webkit.WebView
 import androidx.activity.ComponentActivity
 import androidx.core.app.NotificationCompat
@@ -32,15 +33,17 @@ import com.hermeswebui.android.webui.HermesWebUiScripts
 import org.json.JSONObject
 
 /**
- * The official Webapp in the background: keep-alive, renderer priority, network-change nudges,
- * gateway alerts and tray answers. MainActivity feeds it visibility, document starts, settings and
- * intents; every decision comes from [WebappAlertReducer], and this class only renders its effects.
+ * The official Webapp in the background: keep-alive, renderer priority, network-change nudges, the
+ * native gateway monitor, gateway alerts and tray answers. MainActivity feeds it visibility, document
+ * starts, settings and intents; every decision comes from [WebappAlertReducer], and this class only
+ * renders its effects.
  */
 class WebappGatewayCoordinator(
     private val activity: ComponentActivity,
     private val bridgeName: String,
     private val isTrustedSource: (Uri, Boolean) -> Boolean,
     private val trustedPageOrigin: () -> String?,
+    private val serverUrl: () -> String?,
     initialSettings: WebappBackgroundSettings,
 ) {
     /** Document-start and runtime tap script, built from the parser's own marker list. */
@@ -63,18 +66,18 @@ class WebappGatewayCoordinator(
     /** Alerts posted (or cancelled, as null) during the current dispatch, by notification id. */
     private val trayChanges = mutableMapOf<Int, ShownAlert?>()
     private val groupSweep = Runnable { refreshGroups(emptyMap()) }
+    private val monitor = GatewayMonitorLink(handler, ::dispatch)
 
     private val answerReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            val doc = intent.getStringExtra(EXTRA_DOC)?.let(::DocId) ?: return
-            val prompt = intent.getStringExtra(EXTRA_PROMPT)?.let(PromptKey::decode) ?: return
+            val prompt = intent.getStringExtra(EXTRA_PROMPT)?.let(RpcId::fromToken) ?: return
             val reply = intent.getStringExtra(EXTRA_DECISION)
                 ?.let { name -> Decision.entries.firstOrNull { it.name == name } }
                 ?.let(TrayReply::Decide)
                 ?: intent.getIntExtra(EXTRA_CHOICE, -1).takeIf { it >= 0 }?.let(TrayReply::Choose)
                 ?: RemoteInput.getResultsFromIntent(intent)?.getCharSequence(KEY_REPLY)?.toString()?.let(TrayReply::Reply)
                 ?: return
-            dispatch(WebappInput.TrayAnswer(AnswerTarget(doc, prompt), reply))
+            dispatch(WebappInput.TrayAnswer(AnswerTarget(prompt), reply))
         }
     }
 
@@ -140,6 +143,7 @@ class WebappGatewayCoordinator(
         handler.removeCallbacks(deferredStop)
         handler.removeCallbacks(groupSweep)
         stopKeepAliveService()
+        monitor.stop()
         if (receiverRegistered) runCatching { activity.unregisterReceiver(answerReceiver) }
         receiverRegistered = false
         webView = null
@@ -149,7 +153,7 @@ class WebappGatewayCoordinator(
         if (!isTrustedSource(origin, isMainFrame)) return
         val input = WebappBridgeEnvelope.parse(data) ?: return
         dispatch(input)
-        val doc = state.doc?.id
+        val doc = state.doc
         if (doc != null && input.docId() == doc) {
             replyProxy = proxy
             proxyDoc = doc
@@ -181,8 +185,19 @@ class WebappGatewayCoordinator(
                 NotificationManagerCompat.from(activity).cancel(GatewayAlertKind.ALERT_TAG, id)
                 trayChanges[id] = null
             }
-            is WebappEffect.Send -> send(effect)
+            is WebappEffect.Answer -> when (val via = effect.via) {
+                is AnswerRoute.Page -> sendOnPage(via, effect)
+                is AnswerRoute.Monitor -> dispatch(WebappInput.SendResult(effect.rpcId, monitor.send(via.gen, effect.frame)))
+            }
             is WebappEffect.KeepAlive -> keepAlive(effect.on)
+            is WebappEffect.MonitorMint -> {
+                val url = serverUrl()
+                monitor.mint(effect.gen, url, url?.let { runCatching { CookieManager.getInstance().getCookie(it) }.getOrNull() })
+            }
+            is WebappEffect.MonitorDial -> monitor.dial(effect.gen, effect.ticket)
+            is WebappEffect.MonitorSend -> monitor.send(effect.gen, effect.frame)
+            is WebappEffect.MonitorClose -> monitor.close(effect.gen)
+            is WebappEffect.MonitorRetryAfter -> monitor.retryAfter(effect.gen, effect.delayMs)
             // Posted so it runs after the activity resumes and the WebView is shown again.
             is WebappEffect.FocusSession -> handler.post { focusSession(effect.sessionId) }
         }
@@ -201,17 +216,18 @@ class WebappGatewayCoordinator(
         )
     }
 
-    private fun send(effect: WebappEffect.Send) {
-        val proxy = replyProxy.takeIf { proxyDoc == effect.doc }
+    /** Hands the answer to the tap, which reports `sent` or `sendFailed` for the request id. */
+    private fun sendOnPage(via: AnswerRoute.Page, effect: WebappEffect.Answer) {
+        val proxy = replyProxy.takeIf { proxyDoc == via.doc }
         val message = JSONObject()
             .put("t", "send")
-            .put("doc", effect.doc.value)
-            .put("sock", effect.sock)
-            .put("key", effect.prompt.encode())
+            .put("doc", via.doc.value)
+            .put("sock", via.sock)
+            .put("key", effect.rpcId.json)
             .put("frame", effect.frame)
             .toString()
         val sent = proxy != null && runCatching { proxy.postMessage(message) }.isSuccess
-        if (!sent) dispatch(WebappInput.SendResult(effect.doc, effect.prompt, ok = false))
+        if (!sent) dispatch(WebappInput.SendResult(effect.rpcId, ok = false))
     }
 
     private fun keepAlive(on: Boolean) {
@@ -256,11 +272,16 @@ class WebappGatewayCoordinator(
         )
     }
 
-    /** Default-network callback, live only while keep-alive runs. Callbacks arrive on [handler]. */
+    /** Default-network callback, live only while keep-alive runs, so it outlives the monitor. Callbacks arrive on [handler]. */
     private inner class NetworkWatch(initial: Network?) : ConnectivityManager.NetworkCallback() {
         private val identity = NetworkIdentity(initial)
         private var latest: Network? = initial
-        private val settle = Runnable { if (identity.settle(latest)) nudgeOnline() }
+        private val settle = Runnable {
+            if (identity.settle(latest)) {
+                nudgeOnline()
+                dispatch(WebappInput.NetworkChanged)
+            }
+        }
 
         override fun onAvailable(network: Network) {
             latest = network
@@ -436,16 +457,15 @@ class WebappGatewayCoordinator(
             .setPackage(activity.packageName)
             // Distinct data per prompt and action keeps Android from reusing another prompt's PendingIntent.
             .setData(
-                Uri.Builder().scheme(ANSWER_SCHEME).authority(target.doc.value)
-                    .appendPath(target.prompt.encode()).appendPath(slot).build()
+                Uri.Builder().scheme(ANSWER_SCHEME).authority(ANSWER_AUTHORITY)
+                    .appendPath(target.rpcId.json).appendPath(slot).build()
             )
-            .putExtra(EXTRA_DOC, target.doc.value)
-            .putExtra(EXTRA_PROMPT, target.prompt.encode())
+            .putExtra(EXTRA_PROMPT, target.rpcId.json)
 
     companion object {
         const val ACTION_ANSWER = "com.hermeswebui.android.action.WEBAPP_ANSWER"
         private const val ANSWER_SCHEME = "hermes-webapp-answer"
-        private const val EXTRA_DOC = "com.hermeswebui.android.extra.WEBAPP_DOC"
+        private const val ANSWER_AUTHORITY = "prompt"
         private const val EXTRA_PROMPT = "com.hermeswebui.android.extra.WEBAPP_PROMPT"
         private const val EXTRA_DECISION = "com.hermeswebui.android.extra.WEBAPP_DECISION"
         private const val EXTRA_CHOICE = "com.hermeswebui.android.extra.WEBAPP_CHOICE"
@@ -503,7 +523,6 @@ class WebappGatewayCoordinator(
             is WebappInput.Inbound -> doc
             is WebappInput.Responded -> doc
             is WebappInput.SocketClosed -> doc
-            is WebappInput.SendResult -> doc
             else -> null
         }
     }
