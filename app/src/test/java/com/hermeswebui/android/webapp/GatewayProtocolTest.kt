@@ -52,6 +52,33 @@ class GatewayProtocolTest {
     }
 
     @Test
+    fun `answer acknowledgement preserves the request id and server decision`() {
+        val frame = """{"jsonrpc":"2.0","method":"hermes.android.answer_ack","params":{"id":"srq-1","accepted":true}}"""
+        assertThat(GatewayProtocol.parseMonitorFrame(frame)).isEqualTo(
+            MonitorFrame.AnswerAck(RpcId.fromToken("\"srq-1\"")!!, true)
+        )
+        assertThat(GatewayProtocol.parseMonitorFrame(frame.replace("true", "false"))).isEqualTo(
+            MonitorFrame.AnswerAck(RpcId.fromToken("\"srq-1\"")!!, false)
+        )
+    }
+
+    @Test
+    fun `quiet watch fallback notification parses without changing session events`() {
+        assertThat(GatewayProtocol.parseMonitorFrame(
+            """{"jsonrpc":"2.0","method":"hermes.android.quiet_watch_unavailable","params":{}}"""
+        )).isEqualTo(MonitorFrame.QuietWatchFallback)
+    }
+
+    @Test
+    fun `active sessions supply stored ids and running state`() {
+        val result = JSONObject("""{"sessions":[{"id":"r1","session_key":"k1","status":"working","title":"Task"},{"id":"r2","session_key":"k2","status":"idle"},{"id":"invalid","status":"working"}]}""")
+        assertThat(GatewayProtocol.parseActiveSessions(result)).containsExactly(
+            GatewayEvent.SessionInfo("r1", "k1", true, "Task"),
+            GatewayEvent.SessionInfo("r2", "k2", false, null),
+        ).inOrder()
+    }
+
+    @Test
     fun `each watched frame parses to its domain event`() {
         fixtures.forEach { (frame, expected) ->
             assertWithMessage(frame).that(GatewayProtocol.parseInbound(frame)).isEqualTo(expected)
@@ -212,6 +239,15 @@ class GatewayProtocolTest {
         assertThat(resume.getBoolean("lazy")).isTrue()
         assertThat(resume.getBoolean("omit_messages")).isTrue()
         assertThat(resume.getBoolean("inline_images")).isFalse()
+        val canonical = JSONObject(GatewayProtocol.adaptForSessionAuthority(GatewayProtocol.encodeResume(4, "k1")))
+            .getJSONObject("params")
+        assertThat(canonical.has("lazy")).isFalse()
+        assertThat(canonical.has("inline_images")).isFalse()
+        assertThat(canonical.getBoolean("omit_messages")).isTrue()
+        val canonicalResponse = """{"jsonrpc":"2.0","id":5,"result":{"session_id":"r1","stored_session_id":"k1","running":true,"info":{},"open_requests":[]}}"""
+        assertThat(GatewayProtocol.parseMonitorFrame(canonicalResponse)).isEqualTo(
+            MonitorFrame.Resumed(5, ResumeSnapshot("r1", "k1", true, null, emptyList()))
+        )
         val decline = JSONObject(GatewayProtocol.encodeNotShown(RpcId.fromToken("\"srq-9\"")!!))
         assertThat(decline.getString("id")).isEqualTo("srq-9")
         assertThat(decline.getJSONObject("error").getInt("code")).isEqualTo(4404)

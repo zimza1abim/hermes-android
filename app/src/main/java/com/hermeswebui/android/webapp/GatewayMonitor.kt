@@ -50,13 +50,19 @@ object GatewayMonitorMachine {
     fun retryDelayMs(attempt: Int): Long = (BASE_DELAY_MS shl attempt.coerceIn(0, 5)).coerceAtMost(MAX_DELAY_MS)
 
     /** Brings the connection to [want], then attaches every session in [watch] not yet attached or refused. */
-    fun reconcile(state: MonitorState, want: Boolean, watch: List<String>): Pair<MonitorState, List<WebappEffect>> {
+    fun reconcile(state: MonitorState, want: Boolean, watch: List<String>,
+                  allowRotation: Boolean = true): Pair<MonitorState, List<WebappEffect>> {
         if (!want) {
             return if (state.phase == MonitorPhase.Idle) state to emptyList()
             else state.copy(gen = state.gen + 1, phase = MonitorPhase.Idle) to listOf(WebappEffect.MonitorClose(state.gen))
         }
         if (state.phase == MonitorPhase.Idle) return mint(state, attempt = 0)
         val live = state.live ?: return state to emptyList()
+        // A shared socket cannot safely detach a single legacy viewer. Reconnect it when the
+        // watch set shrinks so the gateway performs its normal multi-viewer teardown.
+        if (allowRotation && live.resuming.isEmpty() && live.attached.keys.any { it !in watch }) {
+            return networkChanged(state)
+        }
         val missing = watch.filter { it !in live.attached && it !in live.resuming.values && it !in live.refused }
         if (missing.isEmpty()) return state to emptyList()
         val ids = missing.indices.map { state.nextRequestId + it }
@@ -110,6 +116,8 @@ object GatewayMonitorMachine {
             MonitorFrame.Ready -> if (phase !is MonitorPhase.Attaching) state to emptyList()
                 else state.copy(phase = MonitorPhase.Live(), nextRequestId = state.nextRequestId + 1) to
                     listOf(WebappEffect.MonitorSend(state.gen, GatewayProtocol.encodeCapabilities(state.nextRequestId)))
+            MonitorFrame.QuietWatchFallback -> if (phase !is MonitorPhase.Live) state to emptyList()
+                else state to listOf(WebappEffect.QuietWatchFallback)
             is MonitorFrame.Capabilities -> if (phase !is MonitorPhase.Live) state to emptyList()
                 else state.copy(phase = phase.copy(declinesNotShown = frame.declinesNotShown)) to emptyList()
             is MonitorFrame.WindowRequest ->
@@ -117,7 +125,7 @@ object GatewayMonitorMachine {
                     WebappEffect.MonitorSend(state.gen, GatewayProtocol.encodeNotShown(frame.rpcId))
                         .takeIf { (phase as? MonitorPhase.Live)?.declinesNotShown == true }
                 )
-            is MonitorFrame.Inbound, is MonitorFrame.Resumed -> state to emptyList()
+            is MonitorFrame.Inbound, is MonitorFrame.Resumed, is MonitorFrame.AnswerAck -> state to emptyList()
         }
     }
 

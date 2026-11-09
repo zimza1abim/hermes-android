@@ -18,6 +18,7 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.hermeswebui.android.MainActivity
 import com.hermeswebui.android.R
+import com.hermeswebui.android.webapp.WebappGatewayCoordinator
 
 /**
  * `specialUse` foreground service whose only job is keeping the process foreground-ranked while the
@@ -40,12 +41,14 @@ class HermesKeepAliveService : Service() {
         } catch (error: IllegalStateException) {
             Log.w(TAG, "Keep-alive could not enter the foreground", error)
             stopSelf()
+            return START_NOT_STICKY
         } catch (error: SecurityException) {
             Log.w(TAG, "Keep-alive could not enter the foreground", error)
             stopSelf()
+            return START_NOT_STICKY
         }
-        // A restarted service without the activity's WebView would keep nothing alive.
-        return START_NOT_STICKY
+        WebappGatewayCoordinator.restoreService(applicationContext)
+        return START_STICKY
     }
 
     private fun ongoingNotification(): Notification =

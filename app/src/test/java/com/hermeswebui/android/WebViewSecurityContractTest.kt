@@ -223,7 +223,7 @@ class WebViewSecurityContractTest {
         val coordinator = codeOnly.entries.single { it.key.endsWith("webapp/WebappGatewayCoordinator.kt") }.value
         assertThat(coordinator).contains("ContextCompat.RECEIVER_NOT_EXPORTED")
         assertThat(coordinator).doesNotContain("RECEIVER_EXPORTED,")
-        assertThat(coordinator).contains(".setPackage(activity.packageName)")
+        assertThat(coordinator).contains(".setPackage(context.packageName)")
         val allow = coordinator.substringAfter("\"Allow\"").substringBefore(".build()")
         assertThat(allow).contains(".setAuthenticationRequired(true)")
         listOf("choiceIntent(actions.target, index)", "replyIntent(actions.target)").forEach { action ->
@@ -238,7 +238,7 @@ class WebViewSecurityContractTest {
         assertThat(reply).contains("PendingIntent.FLAG_MUTABLE")
         assertThat(reply).contains("answerIntent(target, \"reply\")")
         val answerIntent = coordinator.substringAfter("private fun answerIntent(").substringBefore("companion object")
-        assertThat(answerIntent).contains(".setPackage(activity.packageName)")
+        assertThat(answerIntent).contains(".setPackage(context.packageName)")
     }
 
     @Test

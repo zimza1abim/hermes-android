@@ -1,0 +1,4 @@
+name: hermes-android-ack
+description: Confirm Android notification answers only after the gateway settles them
+events:
+  - gateway:startup

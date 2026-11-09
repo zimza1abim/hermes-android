@@ -24,7 +24,10 @@ class WebappBridgeEnvelopeTest {
             .isEqualTo(WebappInput.SocketClosed(doc, 2))
         val id = RpcId.fromToken("\"srq-1\"")!!
         assertThat(WebappBridgeEnvelope.parse(envelope("t" to "sent", "sock" to 2, "key" to id.json)))
-            .isEqualTo(WebappInput.SendResult(id, ok = true))
+            .isNull()
+        val ack = """{"method":"hermes.android.answer_ack","params":{"id":"srq-1","accepted":true}}"""
+        assertThat(WebappBridgeEnvelope.parse(envelope("t" to "in", "sock" to 2, "data" to ack)))
+            .isEqualTo(WebappInput.PageAck(doc, id, true))
         assertThat(WebappBridgeEnvelope.parse(envelope("t" to "sendFailed", "sock" to 2, "key" to id.json)))
             .isEqualTo(WebappInput.SendResult(id, ok = false))
     }

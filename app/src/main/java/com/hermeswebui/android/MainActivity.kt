@@ -389,13 +389,11 @@ class MainActivity : ComponentActivity() {
             isTrustedSource = ::isTrustedNotificationBridgeSource,
             runOnUiThread = { action -> runOnUiThread(action) }
         )
-        webappGateway = WebappGatewayCoordinator(
-            activity = this,
-            bridgeName = HermesWebappGatewayBridgeName,
-            isTrustedSource = ::isTrustedNotificationBridgeSource,
-            trustedPageOrigin = { UrlOrigins.pageOrigin(viewModel.uiState.value.settings.serverUrl) },
-            serverUrl = { viewModel.uiState.value.settings.serverUrl },
-            initialSettings = settingsRepository.getWebappBackgroundSettings()
+        webappGateway = WebappGatewayCoordinator.obtain(applicationContext)
+        webappGateway.attachUi(
+            owner = this,
+            trusted = ::isTrustedNotificationBridgeSource,
+            origin = { UrlOrigins.pageOrigin(viewModel.uiState.value.settings.serverUrl) },
         )
         appUpdateCoordinator = HermesAppUpdateCoordinator(
             context = this,
@@ -563,7 +561,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         if (::serverProfileCoordinator.isInitialized) serverProfileCoordinator.dispose()
-        if (::webappGateway.isInitialized) webappGateway.dispose()
+        if (::webappGateway.isInitialized) webappGateway.dispose(this)
         proxySignInDialog?.dismiss()
         proxyAuthNavigation.clear()
         stopVpnReconnectWaitLoop()

@@ -104,12 +104,14 @@ data class ResumeSnapshot(
 /** One frame the native monitor socket received, reduced to what the app acts on. */
 sealed interface MonitorFrame {
     data object Ready : MonitorFrame
+    data object QuietWatchFallback : MonitorFrame
     data class Inbound(val event: GatewayEvent) : MonitorFrame
     /** The answer to `client.capabilities`; [declinesNotShown] says a 4404 decline does not settle a request. */
     data class Capabilities(val requestId: Int, val declinesNotShown: Boolean) : MonitorFrame
     /** The answer to one of the monitor's `session.resume` calls; null when the server refused it. */
     data class Resumed(val requestId: Int, val snapshot: ResumeSnapshot?) : MonitorFrame
     /** A window-owned server request (preview, terminal, window read, tour) that no app window shows. */
+    data class AnswerAck(val rpcId: RpcId, val accepted: Boolean) : MonitorFrame
     data class WindowRequest(val rpcId: RpcId) : MonitorFrame
 }
 
@@ -124,7 +126,7 @@ object GatewayProtocol {
      * contains one, so the parser and the filter cannot drift apart.
      */
     val WATCHED_MARKERS: List<String> = listOf(
-        "message.complete", "approval", "clarify", "background.complete", "session.title", "session.info", "request.cancel",
+        "message.complete", "approval", "clarify", "background.complete", "session.title", "session.info", "request.cancel", "hermes.android.answer_ack",
     )
 
     /** Server requests only the window showing the session answers; every other client declines them. */
@@ -159,6 +161,13 @@ object GatewayProtocol {
                 else -> null
             }
         }
+        if (method == "hermes.android.quiet_watch_unavailable") return MonitorFrame.QuietWatchFallback
+        if (method == "hermes.android.answer_ack") {
+            val params = frame.optJSONObject("params") ?: return null
+            val id = RpcId.of(params.opt("id")) ?: return null
+            val accepted = params.opt("accepted") as? Boolean ?: return null
+            return MonitorFrame.AnswerAck(id, accepted)
+        }
         if (method in WINDOW_OWNED) return RpcId.of(frame.opt("id"))?.let(MonitorFrame::WindowRequest)
         if (method == "event" && string(frame.optJSONObject("params") ?: JSONObject(), "type") == "gateway.ready") {
             return MonitorFrame.Ready
@@ -169,12 +178,25 @@ object GatewayProtocol {
     private fun parseResume(result: JSONObject): ResumeSnapshot? {
         val runtimeId = string(result, "session_id") ?: return null
         val info = result.optJSONObject("info") ?: JSONObject()
-        val storedId = string(result, "session_key") ?: string(info, "stored_session_id") ?: return null
+        val storedId = string(result, "session_key") ?: string(result, "stored_session_id")
+            ?: string(info, "stored_session_id") ?: return null
         val open = result.optJSONArray("open_requests")
         val requests = if (open == null) emptyList() else (0 until open.length()).mapNotNull { index ->
             open.optJSONObject(index)?.let(::parseFrame) as? GatewayEvent.PromptRequest
         }
         return ResumeSnapshot(runtimeId, storedId, result.opt("running") == true, string(info, "title")?.trim(), requests)
+    }
+
+    /** Converts a live-list snapshot into facts for the monitor; malformed rows are ignored. */
+    fun parseActiveSessions(result: JSONObject): List<GatewayEvent.SessionInfo> {
+        val rows = result.optJSONArray("sessions") ?: return emptyList()
+        return (0 until rows.length()).mapNotNull { index ->
+            val row = rows.optJSONObject(index) ?: return@mapNotNull null
+            val id = string(row, "id") ?: return@mapNotNull null
+            val stored = string(row, "session_key") ?: return@mapNotNull null
+            val status = string(row, "status") ?: return@mapNotNull null
+            GatewayEvent.SessionInfo(id, stored, status != "idle", string(row, "title"))
+        }
     }
 
     fun encodeCapabilities(requestId: Int): String =
@@ -184,6 +206,14 @@ object GatewayProtocol {
     fun encodeResume(requestId: Int, storedId: String): String {
         val params = JSONObject().put("session_id", storedId).put("lazy", true).put("omit_messages", true).put("inline_images", false)
         return """{"jsonrpc":"2.0","id":$requestId,"method":"session.resume","params":$params}"""
+    }
+
+    /** Canonical session authority rejects legacy-only resume parameters. */
+    fun adaptForSessionAuthority(frame: String): String {
+        val request = parseObject(frame) ?: return frame
+        if (string(request, "method") != "session.resume") return frame
+        request.optJSONObject("params")?.apply { remove("lazy"); remove("inline_images") }
+        return request.toString()
     }
 
     fun encodeNotShown(rpcId: RpcId): String =

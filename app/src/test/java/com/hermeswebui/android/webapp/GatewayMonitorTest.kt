@@ -74,6 +74,22 @@ class GatewayMonitorTest {
     }
 
     @Test
+    fun `a session leaving the watch set rotates the shared socket`() {
+        val machine = MonitorState(gen = 4, phase = MonitorPhase.Live(attached = mapOf("a" to "ra", "b" to "rb")))
+        val (next, effects) = GatewayMonitorMachine.reconcile(machine, true, listOf("a"))
+        assertThat(next.phase).isEqualTo(MonitorPhase.Minting(0))
+        assertThat(effects).containsExactly(MonitorClose(4), MonitorMint(5)).inOrder()
+        assertThat(GatewayMonitorMachine.reconcile(machine, true, listOf("a"), allowRotation = false).second).isEmpty()
+    }
+
+    @Test
+    fun `quiet watch fallback warns only for the current live monitor`() {
+        assertThat(last(*live, MonitorReceived(1, MonitorFrame.QuietWatchFallback))
+            .filterIsInstance<WebappEffect.QuietWatchFallback>()).hasSize(1)
+        assertThat(last(*live, MonitorReceived(0, MonitorFrame.QuietWatchFallback))).isEmpty()
+    }
+
+    @Test
     fun `callbacks from an older attempt are dropped`() {
         val retried = arrayOf(Hello(doc), Visibility(false), TicketMinted(1, null), RetryDue(1))
         assertThat(last(*retried, TicketMinted(1, "stale"))).isEmpty()
@@ -161,9 +177,30 @@ class GatewayMonitorTest {
         val allow = TrayAnswer(AnswerTarget(approvalId), TrayReply.Decide(Decision.ALLOW))
         val frame = GatewayProtocol.encodeApprovalAnswer(approvalId, ApprovalChoice.ONCE)
         assertThat(last(*live, Inbound(doc, 1, approval), viaMonitor, allow).first()).isEqualTo(Answer(approvalId, frame, AnswerRoute.Monitor(1)))
-        assertThat(last(*live, Inbound(doc, 2, approval), allow).first()).isEqualTo(Answer(approvalId, frame, AnswerRoute.Page(doc, 2)))
-        assertThat(last(*live, viaMonitor, MonitorClosed(1), allow)).isEmpty()
-        assertThat(stateAfter(*live, viaMonitor, allow, SendResult(approvalId, ok = true), viaMonitor).prompts).isEmpty()
+        assertThat(last(*live, Inbound(doc, 2, approval), allow).filterIsInstance<Answer>().single().via).isEqualTo(AnswerRoute.Page(doc, 2))
+        assertThat(last(*live, viaMonitor, MonitorClosed(1), allow).filterIsInstance<Post>().single().alert.body).contains("Not sent")
+        val pending = stateAfter(*live, viaMonitor, allow)
+        assertThat(pending.prompts[approvalId]?.sending).isTrue()
+        val ack = MonitorReceived(1, MonitorFrame.AnswerAck(approvalId, true))
+        assertThat(stateAfter(*live, viaMonitor, allow, ack, viaMonitor).prompts).isEmpty()
+    }
+
+    @Test
+    fun `acknowledgement controls whether a submitted prompt is removed`() {
+        val fromMonitor = MonitorReceived(1, MonitorFrame.Inbound(approval))
+        val allow = TrayAnswer(AnswerTarget(approvalId), TrayReply.Decide(Decision.ALLOW))
+        val beforeAck = stateAfter(*live, fromMonitor, allow)
+        assertThat(beforeAck.prompts[approvalId]?.sending).isTrue()
+        assertThat(WebappAlertReducer.promptAlerts(beforeAck)).isNotEmpty()
+        val rejected = MonitorReceived(1, MonitorFrame.AnswerAck(approvalId, false))
+        val rejectedState = stateAfter(*live, fromMonitor, allow, rejected)
+        assertThat(rejectedState.prompts[approvalId]?.answerFailed).isTrue()
+        val uncertain = WebappAlertReducer.promptAlerts(rejectedState).values.single()
+        assertThat(uncertain.body).contains("may have been sent")
+        assertThat(uncertain.actions).isNull()
+        assertThat(WebappAlertReducer.reduce(rejectedState, allow).second.filterIsInstance<Answer>()).isEmpty()
+        val accepted = MonitorReceived(1, MonitorFrame.AnswerAck(approvalId, true))
+        assertThat(stateAfter(*live, fromMonitor, allow, accepted).prompts).isEmpty()
     }
 
     @Test
