@@ -190,12 +190,42 @@ pending; loopback WebView fixtures cover the Android boundary only.
 
 ## Official Webapp in the background
 
-The page's own gateway WebSocket survives in the background as long as the
-process stays foreground-ranked and the renderer priority is not waived, so
-Android keeps the WebView alive instead of relaying the socket. The main
-WebView's renderer is kept IMPORTANT and un-waived at all times, not only while
-hidden: under memory pressure a reaped renderer means a page reload and a
-gateway reconnect.
+While the app is hidden the page keeps its own gateway WebSocket, but alerts do
+not depend on it. On One UI the hidden renderer runs in the background
+scheduling group (adj 905) even with an IMPORTANT, un-waived priority policy,
+so frames reached the page's tap about 28 s late. The app process itself is
+foreground-ranked by the keep-alive service, so a native monitor socket owned
+by the app process is the source of alerts while hidden, as
+`HermesReconnectService` monitors Hermes WebUI natively. The main WebView's
+renderer is still kept IMPORTANT and un-waived at all times: under memory
+pressure a reaped renderer means a page reload and a gateway reconnect.
+
+- The monitor is wanted exactly while keep-alive is on (setting on, hidden, a
+  live gateway document) and closes on return, so the page's socket is the
+  only client while visible. `webapp/GatewayMonitor` holds its connection
+  state machine inside the reducer state: `Idle`, `Minting` a ticket,
+  `Connecting`, `Attaching` (open, waiting for `gateway.ready`), `Live`
+  (attaching sessions) and `Backoff` (1 s doubling to 30 s). Every attempt has
+  its own generation; callbacks from an older one are dropped. A settled
+  default-network change (the existing `NetworkWatch`) redials at once.
+- `webapp/GatewayMonitorLink` runs its effects with OkHttp and decides
+  nothing. Each dial mints a one-use ticket with
+  `POST {base}/api/webapp/socket-ticket?socket=gateway`, the WebView cookie and
+  the page `Origin`, then dials `{base}/api/ws?native_dial=browser` with the
+  subprotocols `hermes-gateway-v1, hermes-gateway-ticket.<ticket>`; `{base}`
+  keeps the configured URL's path. WebSocket pings run every 15 s, and a
+  `gateway.ping` is sent at the same rate as the official client does.
+- After `gateway.ready` the monitor sends `client.capabilities
+  {server_requests: true}` (without it the server fails every approval fast
+  once the monitor is a session's only client), then one `session.resume`
+  (`lazy`, `omit_messages`, no inline images) per stored id in
+  `WebappAlertReducer.watchSet`: the chat the page last reported in
+  `session.info`, chats with a running turn and chats with an open prompt.
+  Stored ids come from `session.info` (`stored_session_id`) or a resume
+  answer; a chat whose stored id was never seen is left to the page. The
+  resume answer's `open_requests` opens waiting prompts. Window-owned requests
+  (preview, terminal, window read, tour) are declined with 4404 when the
+  server says it counts declines; other requests are left for the page.
 
 - `webui/HermesWebUiScripts.buildWebappGatewayTapScript` is a document-start
   script (re-run origin-guarded at runtime, idempotent) that wraps
@@ -210,8 +240,9 @@ gateway reconnect.
   hidden for over 25 s is dead (the server-side reader is separate work).
 - `webapp/GatewayProtocol` is the only code that knows the JSON-RPC shapes
   (`message.complete`, `approval`, `clarify`, `approval.cancelled`,
-  `background.complete`, `session.title`) and encodes approval and clarify
-  answers. A clarify keeps every question (`qid`, text, non-blank choices,
+  `request.cancel`, `background.complete`, `session.title`, `session.info`,
+  and the monitor's ready, capabilities and resume frames) and encodes
+  approval and clarify answers and the monitor's requests. A clarify keeps every question (`qid`, text, non-blank choices,
   `multi_select`); its answer is `{"answers":{"<qid>":"<text>"}}` echoing
   the raw request id.
 - `webapp/WebappAlerts` holds `GatewayAlertKind`, the single list behind the
@@ -223,6 +254,17 @@ gateway reconnect.
   page answers, `approval.cancelled`, socket close, a new document and
   settings changes cannot leave a stale Allow/Deny behind. Only `hello`
   changes the document; input for another document is dropped.
+  Hand-off dedupe is the reducer's: a prompt is keyed by the server's request
+  id (`srq-…`, the same frame on every socket) and records which routes
+  delivered it (a page socket, the monitor). It closes when no route reaches
+  it, and an answered or withdrawn id is remembered so a late copy from the
+  slower socket cannot reopen it. A one-shot alert is keyed by the event's
+  per-session `seq`, which the server stamps once before fanning a frame out,
+  so whichever socket delivers it first posts and the other copy is dropped;
+  without a `seq`, a page copy is dropped for sessions the monitor is
+  attached to. Tray answers go on the monitor when it is live and delivered
+  the prompt, else on a page socket that did; the unlock requirement and the
+  `sending` hide/restore are the same on both.
 - `webapp/WebappGatewayCoordinator` checks every bridge message with
   `WebTrustPolicy.isTrustedNotificationBridgeSource`, runs the reducer and
   renders its effects. Alerts use one channel per kind in the "Hermes Agent"
@@ -278,7 +320,8 @@ gateway reconnect.
   change only when a different non-null network became the default. Then a
   live gateway document gets an origin-guarded
   `window.dispatchEvent(new Event('online'))`, whose official handler redials
-  at once instead of waiting on a hidden page's throttled timers.
+  at once instead of waiting on a hidden page's throttled timers, and the
+  monitor redials too.
 - A lost renderer (killed in the background for memory, or crashed) no longer
   kills the app. The main `WebViewClient.onRenderProcessGone` returns true and
   `MainActivity.replaceMainWebViewAfterRendererGone` builds a fresh WebView

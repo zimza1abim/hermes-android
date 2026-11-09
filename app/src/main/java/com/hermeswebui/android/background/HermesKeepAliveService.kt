@@ -20,9 +20,9 @@ import com.hermeswebui.android.MainActivity
 import com.hermeswebui.android.R
 
 /**
- * `specialUse` foreground service whose only job is keeping the process, and so the WebView renderer
- * running the official Webapp, foreground-ranked while the activity is hidden. Unlike `dataSync` it
- * has no Android 15+ daily run-time limit. It holds no socket and no state:
+ * `specialUse` foreground service whose only job is keeping the process foreground-ranked while the
+ * activity is hidden, so the app's native gateway monitor and the official Webapp page stay connected.
+ * Unlike `dataSync` it has no Android 15+ daily run-time limit. It holds no socket and no state:
  * `WebappGatewayCoordinator` starts it and stops it.
  */
 class HermesKeepAliveService : Service() {
