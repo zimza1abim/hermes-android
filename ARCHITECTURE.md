@@ -233,6 +233,14 @@ Android keeps the WebView alive instead of relaying the socket.
   live gateway document gets an origin-guarded
   `window.dispatchEvent(new Event('online'))`, whose official handler redials
   at once instead of waiting on a hidden page's throttled timers.
+- A lost renderer (killed in the background for memory, or crashed) no longer
+  kills the app. The main `WebViewClient.onRenderProcessGone` returns true and
+  `MainActivity.replaceMainWebViewAfterRendererGone` builds a fresh WebView
+  through `buildWebView`, re-runs `WebappGatewayCoordinator.install` (the
+  answer receiver registers once) and tells it the document is gone,
+  reinstalls the document-start scripts, destroys the dead view, bumps the
+  Compose key that hosts the WebView and reloads the current route through
+  `refreshConfiguredHermes`. A popup that loses its renderer is destroyed.
 - Battery optimization is Android-owned state. `MainActivity` reads
   `PowerManager.isIgnoringBatteryOptimizations` into a Compose snapshot on
   every resume and the Notifications section shows it. Only a tap on that row

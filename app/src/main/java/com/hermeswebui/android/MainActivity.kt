@@ -28,10 +28,12 @@ import android.os.SystemClock
 import android.os.PowerManager
 import android.provider.Settings
 import android.view.MotionEvent
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.ClientCertRequest
 import android.webkit.CookieManager
 import android.webkit.PermissionRequest
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.ServiceWorkerController
 import android.webkit.SslErrorHandler
 import android.webkit.ValueCallback
@@ -80,7 +82,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.setValue
@@ -224,6 +228,8 @@ class MainActivity : ComponentActivity() {
     private var vpnReconnectWaitJob: Job? = null
     private var tailscaleLaunchFallbackJob: Job? = null
     private var activityVisible = false
+    /** Bumped when a renderer loss replaces [webView], so Compose hosts the new view. */
+    private var webViewGeneration by mutableIntStateOf(0)
     /** Snapshot of PowerManager's answer for Settings; Android owns the value, onResume refreshes it. */
     private var batteryUnrestricted by mutableStateOf(true)
     private lateinit var appUpdateCoordinator: HermesAppUpdateCoordinator
@@ -689,22 +695,24 @@ class MainActivity : ComponentActivity() {
                             .fillMaxSize()
                             .windowInsetsPadding(WindowInsets.safeDrawing)
                     ) {
-                        WebShell(
-                            webView = webView,
-                            isLoading = uiState.isLoading,
-                            hasLoadedContent = uiState.hasLoadedContent,
-                            isOffline = uiState.isOffline,
-                            isReconnecting = uiState.isReconnecting,
-                            errorMessage = uiState.errorMessage,
-                            onRefresh = onReload,
-                            onRetry = {
-                                viewModel.cancelAutoRetry()
-                                onReload()
-                            },
-                            onOpenExternal = onOpenExternal,
-                            onOpenSettings = { viewModel.openSettings() },
-                            onBack = if (webView.canGoBack()) {{ goBackInMainWebView() }} else null
-                        )
+                        key(webViewGeneration) {
+                            WebShell(
+                                webView = webView,
+                                isLoading = uiState.isLoading,
+                                hasLoadedContent = uiState.hasLoadedContent,
+                                isOffline = uiState.isOffline,
+                                isReconnecting = uiState.isReconnecting,
+                                errorMessage = uiState.errorMessage,
+                                onRefresh = onReload,
+                                onRetry = {
+                                    viewModel.cancelAutoRetry()
+                                    onReload()
+                                },
+                                onOpenExternal = onOpenExternal,
+                                onOpenSettings = { viewModel.openSettings() },
+                                onBack = if (webView.canGoBack()) {{ goBackInMainWebView() }} else null
+                            )
+                        }
                         SnackbarHost(hostState = snackbarHostState)
 
                         // Anti-phishing chip: shows the current host while an in-app OAuth flow is
@@ -1092,6 +1100,11 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
+                override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                    if (view === webView) replaceMainWebViewAfterRendererGone(detail)
+                    return true
+                }
+
                 override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: android.net.http.SslError?) {
                     handler?.cancel()
                     DiagnosticsLogger.record(
@@ -1149,6 +1162,29 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * The renderer was killed (Android reclaiming memory in the background) or crashed. Returning
+     * false from onRenderProcessGone would kill the app with it, so the dead WebView is replaced
+     * through the same build and install path as onCreate, the coordinator learns its document is
+     * gone, and the current route reloads.
+     */
+    private fun replaceMainWebViewAfterRendererGone(detail: RenderProcessGoneDetail?) {
+        val dead = webView
+        DiagnosticsLogger.record(
+            this,
+            "webview_renderer_gone",
+            mapOf("crashed" to (detail?.didCrash() ?: false).toString())
+        )
+        webView = buildWebView()
+        webappGateway.install(webView)
+        webappGateway.onDocumentStarted()
+        installHermesWebUiDocumentStartFixes(webView, viewModel.uiState.value.settings.serverUrl)
+        (dead.parent as? ViewGroup)?.removeView(dead)
+        dead.destroy()
+        webViewGeneration++
+        refreshConfiguredHermes()
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     private fun createPopupWindow(resultMsg: Message?): Boolean {
         val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
@@ -1198,6 +1234,12 @@ class MainActivity : ComponentActivity() {
                 if (!url.isNullOrBlank()) {
                     handlePopupPageStarted(popup, url)
                 }
+            }
+
+            override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                if (activeOAuthPopup === popup) clearActiveOAuthPopup()
+                destroyPopup(popup)
+                return true
             }
         }
     }

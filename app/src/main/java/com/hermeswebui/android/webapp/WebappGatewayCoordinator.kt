@@ -69,17 +69,20 @@ class WebappGatewayCoordinator(
         }
     }
 
+    /** Attaches the main WebView. After a renderer loss, call again with the replacement, then [onDocumentStarted]. */
     fun install(view: WebView) {
         webView = view
         originalRendererPriority = view.rendererRequestedPriority to view.rendererPriorityWaivedWhenNotVisible
-        createChannels(activity)
-        ContextCompat.registerReceiver(
-            activity,
-            answerReceiver,
-            IntentFilter(ACTION_ANSWER).apply { addDataScheme(ANSWER_SCHEME) },
-            ContextCompat.RECEIVER_NOT_EXPORTED
-        )
-        receiverRegistered = true
+        if (!receiverRegistered) {
+            createChannels(activity)
+            ContextCompat.registerReceiver(
+                activity,
+                answerReceiver,
+                IntentFilter(ACTION_ANSWER).apply { addDataScheme(ANSWER_SCHEME) },
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            receiverRegistered = true
+        }
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return
         runCatching {
             WebViewCompat.addWebMessageListener(view, bridgeName, setOf("*")) { _, message, origin, isMainFrame, proxy ->

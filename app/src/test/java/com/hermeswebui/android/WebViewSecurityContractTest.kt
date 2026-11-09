@@ -197,6 +197,28 @@ class WebViewSecurityContractTest {
     }
 
     @Test
+    fun `a lost renderer never takes the app down`() {
+        val activity = codeOnly.entries.single { it.key.endsWith("/MainActivity.kt") }.value
+        val handlers = activity.split("override fun onRenderProcessGone(").drop(1)
+            .map { it.substringBefore("override fun ").substringBefore("private fun ") }
+        assertWithMessage("main and popup WebViewClients handle renderer loss").that(handlers).hasSize(2)
+        handlers.forEach { body ->
+            assertThat(body).contains("return true")
+            assertThat(body).doesNotContain("return false")
+            assertThat(body).doesNotContain("super.onRenderProcessGone")
+        }
+        val replace = activity.substringAfter("private fun replaceMainWebViewAfterRendererGone(").substringBefore("private fun ")
+        listOf(
+            "webView = buildWebView()",
+            "webappGateway.install(webView)",
+            "webappGateway.onDocumentStarted()",
+            "installHermesWebUiDocumentStartFixes(webView",
+            "dead.destroy()",
+            "webViewGeneration++",
+        ).forEach { step -> assertWithMessage(step).that(replace).contains(step) }
+    }
+
+    @Test
     fun `webapp tray answers stay private and Allow requires an unlocked device`() {
         val coordinator = codeOnly.entries.single { it.key.endsWith("webapp/WebappGatewayCoordinator.kt") }.value
         assertThat(coordinator).contains("ContextCompat.RECEIVER_NOT_EXPORTED")
