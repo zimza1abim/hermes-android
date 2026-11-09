@@ -222,9 +222,10 @@ Android keeps the WebView alive instead of relaying the socket.
   redacted public version, and an open-app intent that never loads a URL.
   Allow/Deny are immutable broadcasts to a receiver registered not-exported
   for the activity's lifetime; Allow requires device unlock on Android 12+.
-- `background/HermesKeepAliveService` is a `dataSync` foreground service with
-  a minimum-importance notification. On Android 15+ `onTimeout` stops it and
-  posts one quiet "paused" notice; the next return resets the budget.
+- `background/HermesKeepAliveService` is a `specialUse` foreground service
+  (manifest subtype property) with a minimum-importance notification. Unlike
+  `dataSync` it has no Android 15+ daily run-time limit, so it has no
+  `onTimeout` path. The WebUI reconnect service stays `dataSync`.
 
 ## Reverse-proxy authentication
 

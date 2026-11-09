@@ -9,6 +9,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.filters.SdkSuppress
 import com.google.common.truth.Truth.assertThat
+import com.hermeswebui.android.background.HermesKeepAliveService
 import com.hermeswebui.android.background.HermesReconnectService
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -69,6 +70,23 @@ class ManifestContractTest {
         assertThat(reconnectService.exported).isFalse()
         assertThat(provider.exported).isFalse()
         assertThat(provider.grantUriPermissions).isTrue()
+    }
+
+    @Test
+    @SdkSuppress(minSdkVersion = 34)
+    fun webappKeepAliveServiceIsPrivateSpecialUseWithASubtype() {
+        val keepAlive = packageManager.getServiceInfo(
+            ComponentName(context, HermesKeepAliveService::class.java),
+            PackageManager.ComponentInfoFlags.of(0)
+        )
+        val subtype = packageManager.getProperty(
+            "android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE",
+            ComponentName(context, HermesKeepAliveService::class.java)
+        )
+
+        assertThat(keepAlive.exported).isFalse()
+        assertThat(keepAlive.foregroundServiceType).isEqualTo(ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        assertThat(subtype.string).isNotEmpty()
     }
 
     @Test

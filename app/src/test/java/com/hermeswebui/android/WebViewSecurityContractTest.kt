@@ -158,13 +158,20 @@ class WebViewSecurityContractTest {
     }
 
     @Test
-    fun `the webapp keep-alive service is private and uses the dataSync type`() {
-        val service = Regex("""<service[^>]*android:name="\.background\.HermesKeepAliveService"[^>]*/>""")
+    fun `the webapp keep-alive service is private and uses the uncapped specialUse type`() {
+        val service = Regex("""<service[^>]*android:name="\.background\.HermesKeepAliveService".*?</service>""", RegexOption.DOT_MATCHES_ALL)
             .find(manifest)?.value
         assertWithMessage("HermesKeepAliveService manifest entry").that(service).isNotNull()
         assertThat(service).contains("android:exported=\"false\"")
-        assertThat(service).contains("android:foregroundServiceType=\"dataSync\"")
-        assertThat(manifest).doesNotContain("foregroundServiceType=\"specialUse\"")
+        assertThat(service).contains("android:foregroundServiceType=\"specialUse\"")
+        assertThat(service).contains("android:name=\"android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE\"")
+        assertThat(manifest).contains("android:name=\"android.permission.FOREGROUND_SERVICE_SPECIAL_USE\"")
+        val reconnect = Regex("""<service[^>]*android:name="\.background\.HermesReconnectService"[^>]*/>""")
+            .find(manifest)?.value
+        assertThat(reconnect).contains("android:foregroundServiceType=\"dataSync\"")
+        val keepAlive = codeOnly.entries.single { it.key.endsWith("background/HermesKeepAliveService.kt") }.value
+        assertThat(keepAlive).contains("ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE")
+        assertThat(keepAlive).doesNotContain("FOREGROUND_SERVICE_TYPE_DATA_SYNC")
     }
 
     @Test

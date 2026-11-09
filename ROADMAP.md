@@ -99,7 +99,7 @@ remains tracked by #141 and fdroiddata merge request 55480.
   the checked-in dependency versions (the unrelated local AGP update is not
   required).
 - [x] Official Webapp in the background: keep-alive of the page's own gateway
-  WebSocket (dataSync foreground service, un-waived renderer priority) and
+  WebSocket (specialUse foreground service, un-waived renderer priority) and
   native alerts for finished, failed and background tasks, questions, and
   approvals with Allow/Deny, configurable per kind in Settings > Notifications.
   Device acceptance on a live server is pending.

@@ -100,10 +100,9 @@ open prompts disappear when you return, because the page shows them itself.
 Change this in **Application Settings > Notifications**: stay connected in
 the background, show or hide message previews (the lock screen always hides
 them), turn each kind of alert on or off, and open Android's sound and
-vibration settings for each kind. Android 15 and later limit how long an app
-may stay connected in the background (about six hours a day); when that runs
-out, Hermes shows a "Background connection paused" notice and reconnects the
-next time you open it. Hermes WebUI keeps its own background options.
+vibration settings for each kind. The connection has no daily time limit:
+it stays up until you close the page, turn the setting off or Android stops
+the app. Hermes WebUI keeps its own background options.
 
 ### Launcher icon and server labels
 
