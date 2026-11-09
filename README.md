@@ -85,11 +85,32 @@ actions are not an adapter for the official Webapp's gateway WebSocket
 protocol. Blob/data-URL exports and notification clicks that require a
 page-local JavaScript callback are not yet supported natively.
 
+### Official Webapp in the background
+
+While the official Webapp is open, switching to another app no longer drops
+its connection: Android keeps the page running behind a quiet ongoing
+notification, so progress is already there when you return. While Hermes is
+in the background you also get native alerts when a task finishes, fails or
+is stopped, when a background task finishes, when Hermes has a question, and
+when it asks to run a command. An approval alert offers **Allow** (the phone
+must be unlocked) and **Deny**, answered over the page's own connection.
+Tapping an alert brings Hermes back without reloading the page. Alerts for
+open prompts disappear when you return, because the page shows them itself.
+
+Change this in **Application Settings > Notifications**: stay connected in
+the background, show or hide message previews (the lock screen always hides
+them), turn each kind of alert on or off, and open Android's sound and
+vibration settings for each kind. Android 15 and later limit how long an app
+may stay connected in the background (about six hours a day); when that runs
+out, Hermes shows a "Background connection paused" notice and reconnects the
+next time you open it. Hermes WebUI keeps its own background options.
+
 ### Launcher icon and server labels
 
-In **Application Settings > Appearance > Launcher icon**, near the bottom
-above About, choose the existing
-Hermes WebUI artwork or the official Hermes Agent artwork. This changes only
+The app is named **Hermes** and new installs show the official Hermes Agent
+artwork. In **Application Settings > Appearance > Launcher icon**, near the
+bottom above About, choose the Hermes WebUI artwork or the official Hermes
+Agent artwork; an earlier choice is kept on update. This changes only
 the Android launcher entry, independently of the current server. Launchers may
 take a moment to refresh; a previously pinned home-screen shortcut may need
 to be pinned again.

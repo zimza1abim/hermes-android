@@ -14,6 +14,7 @@
 - `domain/`: intent parsing and validation rules
 - `notification/`: scoped WebUI notification bridge plus Android notification presentation/tap routing
 - `background/`: foreground services plus activity-facing lifecycle/service coordination
+- `webapp/`: official Webapp background presence (gateway protocol, alert reducer, keep-alive and alert coordinator)
 - `server/`: startup preflight and multi-server validation/switch orchestration
 - `update/`: app-update checking, alerting, Play flow launch, and GitHub APK download handling
 - `webview/`: shared WebView configuration helpers
@@ -54,6 +55,7 @@ Recent cleanup keeps `MainActivity` as the Android boundary while moving cluster
 - `HermesNotificationPresenter`: renders Android-backed WebUI notifications and parses trusted notification-tap intents back into WebView navigation.
 - `HermesAppUpdateCoordinator`: owns automatic/manual app-update checks, channel-specific update notifications, Play update launch, and GitHub APK download intents.
 - `HermesServerProfileCoordinator`: owns startup preflight plus add/edit/delete/switch validation and confirmation flows for Hermes server profiles.
+- `WebappGatewayCoordinator`: the only Android-facing owner of the official Webapp in the background (keep-alive service, renderer priority, gateway alerts, tray answers); see "Official Webapp in the background" below.
 - `HermesForegroundServiceCoordinator`: owns reconnect/debug foreground-service lifecycle sync so `onResume`, `onStop`, and settings toggles do not each duplicate service promotion/teardown rules.
 - `HermesWebViewConfigurator`: centralizes shared main/popup WebView hardening and settings setup.
 - `HermesWebViewDownloadListener`: hands allowlisted WebView downloads to Android DownloadManager with session cookies and the WebView user agent. AndroidX WebKit's RFC-compatible filename parser honors `filename*` over `filename` and preserves server-provided extensions even with generic MIME types. Explicit image downloads also retain filenames from inline preview headers; filenames cannot introduce nested destination paths. On Android 10+ downloads land in the shared `Download` folder so they appear in Files > Downloads; Android 8/9 keep the app-specific `Download` folder because shared storage would need `WRITE_EXTERNAL_STORAGE`. Emulator regression tests exercise the production listener and downloaded bytes for both chat and Files endpoints.
@@ -86,7 +88,9 @@ activity aliases. PackageManager component state is the sole persistence source:
 API 33+ changes the aliases atomically; earlier Android enables the replacement
 before disabling the previous entry. Both target the permanently enabled
 `MainActivity`, which retains share and recovery/session deep-link filters.
-The WebUI alias is enabled by default, both preserve the channel-specific app
+The Agent alias is enabled by default (`LauncherIcon.DEFAULT`, pinned against
+the manifest by `LauncherDefaultContractTest`), so only installs whose user
+never chose an icon follow the default. Both preserve the channel-specific app
 label, and the launcher choice is independent of server profiles. Launcher
 cache/pinned-shortcut refresh timing is outside the app's control.
 
@@ -154,8 +158,9 @@ keyboard layout. No Electron bridge is synthesized.
 
 This is browser hosting, not protocol parity: official gateway WebSockets,
 profile/session hash routes and JavaScript notification-click callbacks are
-not the WebUI `/session/{id}`, SSE or approval contract. The native background
-and deep-link features below still describe WebUI only. Blob/data-URL
+not the WebUI `/session/{id}`, SSE or approval contract. The WebUI reconnect
+service and deep-link features below still describe WebUI only; the Webapp's
+own background path is described under "Official Webapp in the background". Blob/data-URL
 downloads and delivery of notification clicks to retained page callbacks
 remain tracked in `ROADMAP.md`. Authenticated live Webapp acceptance is
 pending; loopback WebView fixtures cover the Android boundary only.
@@ -180,8 +185,46 @@ pending; loopback WebView fixtures cover the Android boundary only.
 18. Android maintains a small app-private diagnostic breadcrumb file for startup validation, server health checks, server switching decisions, and main-frame WebView failures. Breadcrumbs store safe metadata only: timestamps, app version, sanitized origin/path, status categories, HTTP status codes, and decisions; they never store cookies, auth headers, query strings, response bodies, or full token-bearing URLs.
 19. Native app update alerts share the existing `Hermes updates` notification channel. The feature has separate settings for update alerts and automatic checks: automatic checks run on each app open while enabled and can be disabled without removing the manual Settings check. Build-time fields select the provider: Google Play release builds query Play Core in-app update availability and notification taps launch the Play immediate update flow, GitHub APK builds query the latest GitHub Release, parse the `*-github.apk` asset plus release notes, and trigger direct APK download through Android `DownloadManager`. The F-Droid `release` build exposes no in-app update provider because F-Droid's client handles updates. On GitHub update downloads, Hermes preflights unknown-sources install permission at download start so users can grant it while the APK downloads. Settings now exposes a stateful primary action (`Check` -> `Download` -> `Install`) and keeps install-ready state after download completion instead of auto-launching the installer while foregrounded; background completion still posts an install-ready notification that returns to Hermes for install handoff (with unknown-sources permission handoff when required). After installer handoff, Android removes the staged GitHub APK on the next app launch to keep app-private downloads clean. Debug builds expose no update provider.
 20. Enabling background foreground-service features from native settings (background activity notifications) requests Android `POST_NOTIFICATIONS` on Android 13+ when needed so users can see the required persistent status notifications.
-21. `hermes://session/{id}` deep links are handled in `MainActivity.onNewIntent`, navigating the WebView to `{serverUrl}/session/{id}` — the Hermes WebUI session route (built by `DeepLinkRoutes.sessionUrl`).
-22. An "Application Settings" entry point is injected into the Hermes WebUI sidebar immediately after the WebUI Settings item via a document-start WebView shim, with Help used only as a fallback anchor if Settings cannot be found. This shim clones the target menu item structure, strips routing attributes, injects a custom phone-outline SVG icon, and binds the click handler to the `hermes://app/settings` deep link, which triggers `MainViewModel.openSettings()` to display the native full-page settings screen overlay (`SettingsScreen`). Android exports the same `hermes://app/settings` deep link as a recovery route so native settings can be opened from ADB or an external link if WebUI is stuck on a bad route.
+21. Official Webapp keep-alive and gateway alerts follow "Official Webapp in the background" below; they never reuse the WebUI reconnect service or its REST approval actions.
+22. `hermes://session/{id}` deep links are handled in `MainActivity.onNewIntent`, navigating the WebView to `{serverUrl}/session/{id}` — the Hermes WebUI session route (built by `DeepLinkRoutes.sessionUrl`).
+23. An "Application Settings" entry point is injected into the Hermes WebUI sidebar immediately after the WebUI Settings item via a document-start WebView shim, with Help used only as a fallback anchor if Settings cannot be found. This shim clones the target menu item structure, strips routing attributes, injects a custom phone-outline SVG icon, and binds the click handler to the `hermes://app/settings` deep link, which triggers `MainViewModel.openSettings()` to display the native full-page settings screen overlay (`SettingsScreen`). Android exports the same `hermes://app/settings` deep link as a recovery route so native settings can be opened from ADB or an external link if WebUI is stuck on a bad route.
+
+## Official Webapp in the background
+
+The page's own gateway WebSocket survives in the background as long as the
+process stays foreground-ranked and the renderer priority is not waived, so
+Android keeps the WebView alive instead of relaying the socket.
+
+- `webui/HermesWebUiScripts.buildWebappGatewayTapScript` is a document-start
+  script (re-run origin-guarded at runtime, idempotent) that wraps
+  `window.WebSocket`. Only sockets to the page's own host whose path ends in
+  `/api/ws` are tapped. On the `webapp` surface (checked per frame) it forwards
+  inbound frames that contain a `GatewayProtocol.WATCHED_MARKERS` substring,
+  page responses and closes to the `HermesAndroidGateway` WebMessageListener,
+  tagged with a random per-document id announced first in a `hello` message.
+  Native can only ask it to send a frame on a socket of that same document.
+- `webapp/GatewayProtocol` is the only code that knows the JSON-RPC shapes
+  (`message.complete`, `approval`, `clarify`, `approval.cancelled`,
+  `background.complete`, `session.title`) and encodes approval answers.
+- `webapp/WebappAlerts` holds `GatewayAlertKind`, the single list behind the
+  channels, settings rows, disabled-kind storage keys and notification id
+  ranges, plus `WebappAlertReducer`. The reducer is pure: keep-alive is on
+  exactly while the setting is on, the activity is stopped and a gateway
+  document is live; shown prompt notifications are derived from the open
+  prompts, and posts and cancels come only from diffing that set, so return,
+  page answers, `approval.cancelled`, socket close, a new document and
+  settings changes cannot leave a stale Allow/Deny behind. Only `hello`
+  changes the document; input for another document is dropped.
+- `webapp/WebappGatewayCoordinator` checks every bridge message with
+  `WebTrustPolicy.isTrustedNotificationBridgeSource`, runs the reducer and
+  renders its effects. Alerts use one channel per kind in the "Hermes Agent"
+  group (approval and clarify high importance), private visibility with a
+  redacted public version, and an open-app intent that never loads a URL.
+  Allow/Deny are immutable broadcasts to a receiver registered not-exported
+  for the activity's lifetime; Allow requires device unlock on Android 12+.
+- `background/HermesKeepAliveService` is a `dataSync` foreground service with
+  a minimum-importance notification. On Android 15+ `onTimeout` stops it and
+  posts one quiet "paused" notice; the next return resets the budget.
 
 ## Reverse-proxy authentication
 

@@ -98,10 +98,15 @@ remains tracked by #141 and fdroiddata merge request 55480.
   regressions pass GREEN with the integration on the API 36 emulator, including
   the checked-in dependency versions (the unrelated local AGP update is not
   required).
-- [ ] Official Webapp follow-ups: gateway-WebSocket background monitoring and
-  session deep links, blob/data-URL export handoff, and notification-tap
-  delivery to page-local session-focus callbacks. Keep WebUI's existing
-  SSE/approval contracts separate.
+- [x] Official Webapp in the background: keep-alive of the page's own gateway
+  WebSocket (dataSync foreground service, un-waived renderer priority) and
+  native alerts for finished, failed and background tasks, questions, and
+  approvals with Allow/Deny, configurable per kind in Settings > Notifications.
+  Device acceptance on a live server is pending.
+- [ ] Official Webapp follow-ups: session deep links and focusing the alert's
+  session on tap without a reload, blob/data-URL export handoff, and
+  notification-tap delivery to page-local session-focus callbacks. Keep WebUI's
+  existing SSE/approval contracts separate.
 
 - [x] File upload support
 - [x] File download support
@@ -207,6 +212,7 @@ sketches are captured inline below.
 
 | ID | Date | Area | Summary |
 |---|---|---|---|
+| NOTIF-002 | 2026-11-09 | Notifications / Background | Kept the official Webapp's gateway connection alive in the background and added native alerts for finished, failed and background tasks, questions, and approvals (Allow needs an unlocked phone), each on its own channel in a "Hermes Agent" group with per-kind switches, a preview switch and a keep-alive switch in Settings > Notifications. The app is now named "Hermes" and new installs default to the Agent launcher icon. |
 | CLEANUP-006 | 2026-11-09 | Troubleshooting | Removed the debug log capture feature (DBG-001, DBG-002): the Settings "Capture debug logs" switch with its Share log / Save log buttons, the debug-build floating Save log overlay, the logcat foreground service and its "Debug logging is running" notification, and the debug-build auto-start that re-enabled capture on every launch. Troubleshooting keeps the GitHub issue links; the diagnostic breadcrumb file is unchanged |
 | BUG-057 | 2026-11-07 | Deep links | Fixed Issue #170: `hermes://session/{id}` and `hermes://app/settings` now work when the app starts from a closed state, not only through `onNewIntent`. A cold-start session link feeds the same trusted-route startup override as a notification tap, so `SelectedServerNavigation.startupUrl` still gates it, and the settings link is skipped on activity recreation. Two cold-start API 35 tests failed before the fix and pass after it. |
 | TEST-009 | 2026-11-07 | QA | Closed Issue #150's QA hardening (see QA-001). Added JVM-tested extractions for the LAN preflight, hardware-keyboard, SSE cookie and status-fallback rules, six OIDC/dead-URL/deep-link/Settings flow tests, notification-facade and long-press fixtures, client-certificate password cases and a server-switch session-wipe guard. Each guard was shown to fail when its rule was deliberately broken. |
