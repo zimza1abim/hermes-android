@@ -93,6 +93,18 @@ class HermesWebUiScriptsTest {
     }
 
     @Test
+    fun `a native alert tap runs the kept Webapp notification click for that session only`() {
+        val facade = HermesWebUiScripts.buildNotificationBridgeScript("HermesAndroidNotifications", "granted")
+        assertThat(facade).contains("var kindEnd = tags[i].indexOf(':', 'hermes:'.length);")
+        assertThat(facade).contains("if (kindEnd === -1 || tags[i].slice(kindEnd + 1) !== String(sessionId)) continue;")
+        assertThat(facade).contains("for (var i = tags.length - 1; i >= 0; i--) {")
+
+        val focus = HermesWebUiScripts.buildWebappFocusSessionScript("s\"1</script>")
+        assertThat(focus).contains("window.__hermesAndroidFocusSession(\"s\\\"1<\\/script>\");")
+        assertThat(focus).startsWith("if (typeof window.__hermesAndroidFocusSession === 'function') {")
+    }
+
+    @Test
     fun `viewport fix script injects CSS custom properties for viewport dimensions`() {
         val script = HermesWebUiScripts.viewportFixScript
 

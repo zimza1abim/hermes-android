@@ -103,10 +103,11 @@ remains tracked by #141 and fdroiddata merge request 55480.
   native alerts for finished, failed and background tasks, questions, and
   approvals with Allow/Deny, configurable per kind in Settings > Notifications.
   Device acceptance on a live server is pending.
-- [ ] Official Webapp follow-ups: session deep links and focusing the alert's
-  session on tap without a reload, blob/data-URL export handoff, and
-  notification-tap delivery to page-local session-focus callbacks. Keep WebUI's
-  existing SSE/approval contracts separate.
+- [x] Official Webapp alert taps open the alert's session without a reload by
+  running the page's own kept notification click; the page's duplicate
+  browser notifications are no longer posted.
+- [ ] Official Webapp follow-ups: session deep links and blob/data-URL export
+  handoff. Keep WebUI's existing SSE/approval contracts separate.
 
 - [x] File upload support
 - [x] File download support

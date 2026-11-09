@@ -161,8 +161,7 @@ profile/session hash routes and JavaScript notification-click callbacks are
 not the WebUI `/session/{id}`, SSE or approval contract. The WebUI reconnect
 service and deep-link features below still describe WebUI only; the Webapp's
 own background path is described under "Official Webapp in the background". Blob/data-URL
-downloads and delivery of notification clicks to retained page callbacks
-remain tracked in `ROADMAP.md`. Authenticated live Webapp acceptance is
+downloads remain tracked in `ROADMAP.md`. Authenticated live Webapp acceptance is
 pending; loopback WebView fixtures cover the Android boundary only.
 
 1. App starts and loads encrypted WebUI settings (`SettingsRepository`). The bundled dashboard origin default is blank so WebUI owns dashboard auto-detect and persistence.
@@ -232,6 +231,17 @@ Android keeps the WebView alive instead of relaying the socket.
   and they duplicate the gateway alerts above. It keeps each such instance,
   with its `onclick`, in a per-document registry keyed by tag (newest 32;
   `close()` removes it). Hermes WebUI notifications are unchanged.
+- Every alert carries its session id, and its content intent is the open-app
+  intent with that id (request code = the alert's notification id, so alerts
+  keep separate extras). `WebappGatewayCoordinator.handleIntent` turns the id
+  into `WebappInput.FocusRequested`; the reducer alone holds the pending focus
+  and emits `FocusSession` once, only while visible with a live document (a
+  new document drops it). The coordinator posts that effect to run after the
+  resume and evaluates an origin-guarded call to
+  `window.__hermesAndroidFocusSession`, which runs the newest kept page
+  notification's `onclick` whose tag is `hermes:<kind>:<sessionId>`. The
+  Webapp's handler opens the session in place; with nothing kept the tap only
+  brings the app forward. No URL is ever loaded.
 - `background/HermesKeepAliveService` is a `specialUse` foreground service
   (manifest subtype property) with a minimum-importance notification. Unlike
   `dataSync` it has no Android 15+ daily run-time limit, so it has no

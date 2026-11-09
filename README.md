@@ -82,8 +82,7 @@ editors, mobile keyboard behavior, tabs, responsive layout, and voice UI;
 Android does not emulate Electron or inject WebUI's sidebar/editor repairs.
 WebUI-specific session deep links, background SSE monitoring and approval
 actions are not an adapter for the official Webapp's gateway WebSocket
-protocol. Blob/data-URL exports and notification clicks that require a
-page-local JavaScript callback are not yet supported natively.
+protocol. Blob/data-URL exports are not yet supported natively.
 
 ### Official Webapp in the background
 
@@ -94,7 +93,8 @@ in the background you also get native alerts when a task finishes, fails or
 is stopped, when a background task finishes, when Hermes has a question, and
 when it asks to run a command. An approval alert offers **Allow** (the phone
 must be unlocked) and **Deny**, answered over the page's own connection.
-Tapping an alert brings Hermes back without reloading the page. Alerts for
+Tapping an alert brings Hermes back without reloading the page and opens
+that alert's session when the page has its own notification for it. Alerts for
 open prompts disappear when you return, because the page shows them itself.
 
 Change this in **Application Settings > Notifications**: stay connected in

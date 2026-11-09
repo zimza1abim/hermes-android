@@ -2,10 +2,12 @@ package com.hermeswebui.android.webapp
 
 import com.google.common.truth.Truth.assertThat
 import com.hermeswebui.android.webapp.WebappEffect.Cancel
+import com.hermeswebui.android.webapp.WebappEffect.FocusSession
 import com.hermeswebui.android.webapp.WebappEffect.KeepAlive
 import com.hermeswebui.android.webapp.WebappEffect.Post
 import com.hermeswebui.android.webapp.WebappEffect.Send
 import com.hermeswebui.android.webapp.WebappInput.DocumentGone
+import com.hermeswebui.android.webapp.WebappInput.FocusRequested
 import com.hermeswebui.android.webapp.WebappInput.Hello
 import com.hermeswebui.android.webapp.WebappInput.Inbound
 import com.hermeswebui.android.webapp.WebappInput.Responded
@@ -74,7 +76,7 @@ class WebappAlertReducerTest {
     fun `one-shot alerts post only while hidden and enabled`() {
         assertThat(effectsOf(Hello(doc), Inbound(doc, 1, completed))).isEmpty()
         val posted = effectsOf(*hidden, Inbound(doc, 1, completed)).single() as Post
-        assertThat(posted.alert).isEqualTo(Alert(GatewayAlertKind.TURN_COMPLETE, "s1", "Task finished", "All done", null))
+        assertThat(posted.alert).isEqualTo(Alert(GatewayAlertKind.TURN_COMPLETE, "s1", "s1", "Task finished", "All done", null))
         val disabled = WebappBackgroundSettings(disabled = setOf(GatewayAlertKind.TURN_COMPLETE))
         assertThat(effectsOf(*hidden, SettingsChanged(disabled), Inbound(doc, 1, completed))).isEmpty()
     }
@@ -85,10 +87,10 @@ class WebappAlertReducerTest {
         val stopped = GatewayEvent.TurnEnded("s1", TurnOutcome.INTERRUPTED, null, null)
         val background = GatewayEvent.BackgroundCompleted("s2", "Report ready")
         fun alertFor(event: GatewayEvent) = (effectsOf(*hidden, Inbound(doc, 1, event)).single() as Post).alert
-        assertThat(alertFor(failed)).isEqualTo(Alert(GatewayAlertKind.TURN_FAILED, "s1", "Task failed", "boom", null))
-        assertThat(alertFor(stopped)).isEqualTo(Alert(GatewayAlertKind.TURN_FAILED, "s1", "Task stopped", null, null))
+        assertThat(alertFor(failed)).isEqualTo(Alert(GatewayAlertKind.TURN_FAILED, "s1", "s1", "Task failed", "boom", null))
+        assertThat(alertFor(stopped)).isEqualTo(Alert(GatewayAlertKind.TURN_FAILED, "s1", "s1", "Task stopped", null, null))
         assertThat(alertFor(background))
-            .isEqualTo(Alert(GatewayAlertKind.BACKGROUND_COMPLETE, "s2", "Background task finished", "Report ready", null))
+            .isEqualTo(Alert(GatewayAlertKind.BACKGROUND_COMPLETE, "s2", "s2", "Background task finished", "Report ready", null))
     }
 
     @Test
@@ -116,11 +118,11 @@ class WebappAlertReducerTest {
     fun `an approval shows with an answer target while hidden`() {
         val alert = (effectsOf(*hidden, Inbound(doc, 1, approval)).single() as Post).alert
         assertThat(alert).isEqualTo(
-            Alert(GatewayAlertKind.APPROVAL, approvalKey.encode(), "Approval needed", "rm -rf build", AnswerTarget(doc, approvalKey))
+            Alert(GatewayAlertKind.APPROVAL, approvalKey.encode(), "s1", "Approval needed", "rm -rf build", AnswerTarget(doc, approvalKey))
         )
         val question = (effectsOf(*hidden, Inbound(doc, 1, clarify)).single() as Post).alert
         assertThat(question).isEqualTo(
-            Alert(GatewayAlertKind.CLARIFY, clarifyKey.encode(), "Hermes has a question", "Which branch?", null)
+            Alert(GatewayAlertKind.CLARIFY, clarifyKey.encode(), "s1", "Hermes has a question", "Which branch?", null)
         )
     }
 
@@ -217,6 +219,36 @@ class WebappAlertReducerTest {
             .containsExactly(Cancel(GatewayAlertKind.APPROVAL, approvalKey.encode()))
         assertThat(effectsOf(*hidden, Inbound(doc, 1, approval), off, SettingsChanged(WebappBackgroundSettings())).single())
             .isInstanceOf(Post::class.java)
+    }
+
+    @Test
+    fun `an alert tap opens its session once the app is visible`() {
+        val tapped = arrayOf(*hidden, FocusRequested("s1"))
+        assertThat(effectsOf(*tapped)).isEmpty()
+        assertThat(effectsOf(*tapped, Visibility(true))).containsExactly(KeepAlive(false), FocusSession("s1"))
+        assertThat(allEffects(*tapped, Visibility(true), Visibility(false), Visibility(true)).filterIsInstance<FocusSession>())
+            .containsExactly(FocusSession("s1"))
+        assertThat(effectsOf(Hello(doc), FocusRequested("s2"))).containsExactly(FocusSession("s2"))
+        assertThat(effectsOf(*hidden, FocusRequested("s1"), FocusRequested("s2"), Visibility(true)))
+            .contains(FocusSession("s2"))
+    }
+
+    @Test
+    fun `a focus request without a live document is dropped`() {
+        assertThat(run(*hidden, FocusRequested("s1"), DocumentGone, Visibility(true)).second.filterIsInstance<FocusSession>())
+            .isEmpty()
+        assertThat(effectsOf(*hidden, FocusRequested("s1"), Hello(DocId("doc-b")), Visibility(true)))
+            .doesNotContain(FocusSession("s1"))
+        val (state, effects) = run(FocusRequested("s1"))
+        assertThat(effects).isEmpty()
+        assertThat(state.focus).isNull()
+    }
+
+    @Test
+    fun `alerts carry their session for the tap`() {
+        assertThat((effectsOf(*hidden, Inbound(doc, 1, approval)).single() as Post).alert.sessionId).isEqualTo("s1")
+        val background = GatewayEvent.BackgroundCompleted("s2", "Report ready")
+        assertThat((effectsOf(*hidden, Inbound(doc, 1, background)).single() as Post).alert.sessionId).isEqualTo("s2")
     }
 
     @Test

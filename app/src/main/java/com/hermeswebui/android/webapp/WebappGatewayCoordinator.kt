@@ -104,8 +104,17 @@ class WebappGatewayCoordinator(
         if (settings != state.settings) dispatch(WebappInput.SettingsChanged(settings))
     }
 
-    /** True for a Webapp notification tap, which only brings the task forward and never loads a URL. */
-    fun handleIntent(intent: Intent?): Boolean = intent?.action == HermesKeepAliveService.ACTION_OPEN_APP
+    /**
+     * True for a Webapp notification tap, which brings the task forward and never loads a URL. An
+     * alert tap also names its session, which the page is asked to open once the app is visible.
+     */
+    fun handleIntent(intent: Intent?): Boolean {
+        if (intent?.action != HermesKeepAliveService.ACTION_OPEN_APP) return false
+        intent.getStringExtra(HermesKeepAliveService.EXTRA_SESSION_ID)
+            ?.takeIf { it.isNotBlank() && it.length <= MAX_SESSION_ID }
+            ?.let { dispatch(WebappInput.FocusRequested(it)) }
+        return true
+    }
 
     /** Withdraws prompts (their socket dies with this WebView), stops keep-alive and unregisters. */
     fun dispose() {
@@ -150,7 +159,22 @@ class WebappGatewayCoordinator(
                 .cancel(GatewayAlertKind.ALERT_TAG, effect.kind.notificationId(effect.key))
             is WebappEffect.Send -> send(effect)
             is WebappEffect.KeepAlive -> keepAlive(effect.on)
+            // Posted so it runs after the activity resumes and the WebView is shown again.
+            is WebappEffect.FocusSession -> handler.post { focusSession(effect.sessionId) }
         }
+    }
+
+    /** Runs the page's own notification click for the session, which opens it in place without a reload. */
+    private fun focusSession(sessionId: String) {
+        val view = webView ?: return
+        val origin = trustedPageOrigin() ?: return
+        view.evaluateJavascript(
+            HermesWebUiScripts.buildOriginGuardedRuntimeScript(
+                origin,
+                HermesWebUiScripts.buildWebappFocusSessionScript(sessionId)
+            ),
+            null
+        )
     }
 
     private fun send(effect: WebappEffect.Send) {
@@ -253,7 +277,9 @@ class WebappGatewayCoordinator(
             .setSmallIcon(R.drawable.ic_notification)
             .setColor(ContextCompat.getColor(activity, R.color.brand_sky))
             .setContentTitle(alert.title)
-            .setContentIntent(HermesKeepAliveService.openAppIntent(activity))
+            .setContentIntent(
+                HermesKeepAliveService.openAppIntent(activity, alert.sessionId, alert.kind.notificationId(alert.key))
+            )
             .setAutoCancel(true)
             .setCategory(if (alert.kind.isPrompt) NotificationCompat.CATEGORY_REMINDER else NotificationCompat.CATEGORY_STATUS)
             .setPriority(
@@ -299,6 +325,7 @@ class WebappGatewayCoordinator(
         private const val EXTRA_DECISION = "com.hermeswebui.android.extra.WEBAPP_DECISION"
         private const val KEEP_ALIVE_STOP_GRACE_MS = 15_000L
         private const val NETWORK_SETTLE_MS = 1_000L
+        private const val MAX_SESSION_ID = 256
 
         /** One channel per [GatewayAlertKind] plus the keep-alive channel, grouped as "Hermes Agent". */
         fun createChannels(context: Context) {

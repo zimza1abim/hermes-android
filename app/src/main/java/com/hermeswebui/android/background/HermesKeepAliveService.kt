@@ -67,6 +67,7 @@ class HermesKeepAliveService : Service() {
         const val CHANNEL_GROUP_ID = "hermes_webapp"
         const val NOTIFICATION_ID = 20_021
         const val ACTION_OPEN_APP = "com.hermeswebui.android.action.OPEN_WEBAPP"
+        const val EXTRA_SESSION_ID = "com.hermeswebui.android.extra.WEBAPP_SESSION_ID"
         private const val TAG = "HermesKeepAliveService"
 
         fun ensureChannel(context: Context) {
@@ -78,15 +79,20 @@ class HermesKeepAliveService : Service() {
             context.getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
         }
 
-        /** Brings the existing task forward. It never carries a URL: a reload would drop the live socket. */
-        fun openAppIntent(context: Context): PendingIntent = PendingIntent.getActivity(
-            context,
-            0,
-            Intent(context, MainActivity::class.java)
-                .setAction(ACTION_OPEN_APP)
-                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
+        /**
+         * Brings the existing task forward. It never carries a URL: a reload would drop the live socket.
+         * An alert passes its [sessionId] and its own [requestCode], so alerts keep separate extras.
+         */
+        fun openAppIntent(context: Context, sessionId: String? = null, requestCode: Int = 0): PendingIntent =
+            PendingIntent.getActivity(
+                context,
+                requestCode,
+                Intent(context, MainActivity::class.java)
+                    .setAction(ACTION_OPEN_APP)
+                    .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    .apply { if (sessionId != null) putExtra(EXTRA_SESSION_ID, sessionId) },
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
 
         fun canPostNotifications(context: Context): Boolean =
             Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||

@@ -1444,6 +1444,22 @@ object HermesWebUiScripts {
                   });
               }
 
+              // A native gateway alert tap names a session; run the newest kept notification's own
+              // click for it, which opens that session in place.
+              window.__hermesAndroidFocusSession = function(sessionId) {
+                var tags = Object.keys(pageNotifications);
+                for (var i = tags.length - 1; i >= 0; i--) {
+                  var kindEnd = tags[i].indexOf(':', 'hermes:'.length);
+                  if (kindEnd === -1 || tags[i].slice(kindEnd + 1) !== String(sessionId)) continue;
+                  var notification = pageNotifications[tags[i]];
+                  if (typeof notification.onclick === 'function') {
+                    try { notification.onclick(safeEvent('click')); } catch (_) {}
+                  }
+                  return true;
+                }
+                return false;
+              };
+
               HermesAndroidNotification.prototype.close = function() {
                 if (pageNotifications[this.tag] === this) delete pageNotifications[this.tag];
                 if (typeof this.onclose === 'function') this.onclose(safeEvent('close'));
@@ -1675,6 +1691,16 @@ object HermesWebUiScripts {
                 window.dispatchEvent(new CustomEvent('hermes-app-foreground', { detail: { active: active } }));
               } catch (_) {}
             })();
+        """.trimIndent()
+    }
+
+    /** Asks the notification facade to open [sessionId] through the page's own kept notification. */
+    fun buildWebappFocusSessionScript(sessionId: String): String {
+        val quotedSessionId = JSONObject.quote(sessionId)
+        return """
+            if (typeof window.__hermesAndroidFocusSession === 'function') {
+              window.__hermesAndroidFocusSession($quotedSessionId);
+            }
         """.trimIndent()
     }
 

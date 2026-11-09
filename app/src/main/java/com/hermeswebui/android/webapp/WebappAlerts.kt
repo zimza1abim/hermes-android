@@ -110,6 +110,8 @@ data class WebappState(
     val visible: Boolean = true,
     /** Null while no gateway document is live in the WebView. */
     val doc: GatewayDocument? = null,
+    /** The session an alert tap asked to open, held until the app is visible. */
+    val focus: String? = null,
 )
 
 data class AnswerTarget(val doc: DocId, val prompt: PromptKey)
@@ -119,6 +121,8 @@ data class Alert(
     val kind: GatewayAlertKind,
     /** Replaces per key: the session id for one-shot kinds, the encoded [PromptKey] for prompts. */
     val key: String,
+    /** A tap asks the page to open this session. */
+    val sessionId: String,
     val title: String,
     val body: String?,
     /** Set only for approvals, which carry Allow and Deny actions. */
@@ -137,6 +141,8 @@ sealed interface WebappInput {
     data class TrayAnswer(val target: AnswerTarget, val decision: Decision) : WebappInput
     data class Visibility(val visible: Boolean) : WebappInput
     data class SettingsChanged(val settings: WebappBackgroundSettings) : WebappInput
+    /** An alert tap brought the app forward and names the session to open. */
+    data class FocusRequested(val sessionId: String) : WebappInput
     data object DocumentGone : WebappInput
 }
 
@@ -145,6 +151,8 @@ sealed interface WebappEffect {
     data class Cancel(val kind: GatewayAlertKind, val key: String) : WebappEffect
     data class Send(val doc: DocId, val sock: Int, val prompt: PromptKey, val frame: String) : WebappEffect
     data class KeepAlive(val on: Boolean) : WebappEffect
+    /** Ask the live document to open a session; emitted only while visible. */
+    data class FocusSession(val sessionId: String) : WebappEffect
 }
 
 /**
@@ -157,13 +165,16 @@ sealed interface WebappEffect {
  *  - One-shot alerts are posted only while hidden and enabled.
  *  - Only [WebappInput.Hello] changes the document; any other input naming another document is dropped.
  *  - A send is emitted only for an open approval that is not already sending.
+ *  - A focus request is delivered at most once, only while visible and a document is live; a new
+ *    document drops it.
  */
 object WebappAlertReducer {
     private const val MAX_DETAIL = 1_000
 
     fun reduce(state: WebappState, input: WebappInput): Pair<WebappState, List<WebappEffect>> {
-        val (next, actions) = apply(state, input)
-        return next to (actions + diffPrompts(state, next) + keepAliveChange(state, next))
+        val (applied, actions) = apply(state, input)
+        val (next, focus) = deliverFocus(applied)
+        return next to (actions + diffPrompts(state, next) + keepAliveChange(state, next) + focus)
     }
 
     fun keepAlive(state: WebappState): Boolean = state.settings.keepAlive && !state.visible && state.doc != null
@@ -181,9 +192,10 @@ object WebappAlertReducer {
         when (input) {
             is WebappInput.Visibility -> state.copy(visible = input.visible) to emptyList()
             is WebappInput.SettingsChanged -> state.copy(settings = input.settings) to emptyList()
-            WebappInput.DocumentGone -> state.copy(doc = null) to emptyList()
+            is WebappInput.FocusRequested -> state.copy(focus = input.sessionId) to emptyList()
+            WebappInput.DocumentGone -> state.copy(doc = null, focus = null) to emptyList()
             is WebappInput.Hello ->
-                (if (state.doc?.id == input.doc) state else state.copy(doc = GatewayDocument(input.doc))) to emptyList()
+                (if (state.doc?.id == input.doc) state else state.copy(doc = GatewayDocument(input.doc), focus = null)) to emptyList()
             is WebappInput.Inbound -> state.docFor(input.doc)
                 ?.let { inbound(state, it, input.sock, input.event) }
                 ?: (state to emptyList())
@@ -282,6 +294,7 @@ object WebappAlertReducer {
         return Alert(
             kind = kind,
             key = key,
+            sessionId = sessionId,
             title = if (sessionTitle != null) "$headline · $sessionTitle" else headline,
             body = detail?.takeIf { preview }?.trim()?.take(MAX_DETAIL)?.ifEmpty { null },
             answer = answer,
@@ -294,6 +307,13 @@ object WebappAlertReducer {
         val cancels = (old.keys - new.keys).map { (kind, key) -> WebappEffect.Cancel(kind, key) }
         val posts = new.filter { (slot, alert) -> old[slot] != alert }.values.map(WebappEffect::Post)
         return cancels + posts
+    }
+
+    private fun deliverFocus(state: WebappState): Pair<WebappState, List<WebappEffect>> {
+        val sessionId = state.focus ?: return state to emptyList()
+        if (!state.visible) return state to emptyList()
+        val cleared = state.copy(focus = null)
+        return cleared to listOfNotNull(WebappEffect.FocusSession(sessionId).takeIf { state.doc != null })
     }
 
     private fun keepAliveChange(before: WebappState, after: WebappState): List<WebappEffect> {
