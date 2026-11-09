@@ -25,6 +25,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Message
 import android.os.SystemClock
+import android.os.PowerManager
 import android.provider.Settings
 import android.view.MotionEvent
 import android.view.WindowManager
@@ -223,6 +224,8 @@ class MainActivity : ComponentActivity() {
     private var vpnReconnectWaitJob: Job? = null
     private var tailscaleLaunchFallbackJob: Job? = null
     private var activityVisible = false
+    /** Snapshot of PowerManager's answer for Settings; Android owns the value, onResume refreshes it. */
+    private var batteryUnrestricted by mutableStateOf(true)
     private lateinit var appUpdateCoordinator: HermesAppUpdateCoordinator
     private lateinit var notificationBridgeCoordinator: HermesNotificationBridgeCoordinator
     private lateinit var clipboardBridgeCoordinator: HermesClipboardBridgeCoordinator
@@ -518,6 +521,7 @@ class MainActivity : ComponentActivity() {
             viewModel.onAppForegrounded()
             updateWebNotificationPermissionState()
             appUpdateCoordinator.resumePendingGitHubInstallIfReady()
+            refreshBatteryOptimizationState()
             viewModel.resumeAutoRetryIfNeeded()
             startVpnReconnectWaitLoopIfNeeded()
             appUpdateCoordinator.resumePlayUpdateIfNeeded()
@@ -797,6 +801,8 @@ class MainActivity : ComponentActivity() {
                         viewModel.setWebappBackgroundSettings(settings)
                     },
                     onOpenNotificationChannel = ::openNotificationChannelSettings,
+                    batteryUnrestricted = batteryUnrestricted,
+                    onOpenBatterySettings = ::openBatteryOptimizationSettings,
                     onSetAppUpdateAlertsEnabled = { enabled ->
                         if (enabled) {
                             requestNotificationPermissionIfNeeded()
@@ -2284,6 +2290,23 @@ class MainActivity : ComponentActivity() {
         runCatching { startActivity(intent) }.onFailure {
             Toast.makeText(this, "Could not open notification settings", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun refreshBatteryOptimizationState() {
+        batteryUnrestricted = getSystemService(PowerManager::class.java)?.isIgnoringBatteryOptimizations(packageName) ?: true
+    }
+
+    /**
+     * Samsung and other OEMs close battery-optimized apps even while a foreground service runs. Asks
+     * once per tap; when already exempt, opens the list so the user can turn it back off.
+     */
+    @SuppressLint("BatteryLife")
+    private fun openBatteryOptimizationSettings() {
+        val request = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, "package:$packageName".toUri())
+        val list = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+        val opened = (!batteryUnrestricted && runCatching { startActivity(request) }.isSuccess) ||
+            runCatching { startActivity(list) }.isSuccess
+        if (!opened) Toast.makeText(this, "Could not open battery settings", Toast.LENGTH_SHORT).show()
     }
 
     private fun openInExternalBrowser(url: String) {

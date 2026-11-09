@@ -268,7 +268,9 @@ internal fun AboutSettingsSection(appVersionLabel: String, appUpdateChannelLabel
 internal fun WebappNotificationsSection(
     settings: WebappBackgroundSettings,
     onChange: (WebappBackgroundSettings) -> Unit,
-    onOpenChannel: (String?) -> Unit
+    onOpenChannel: (String?) -> Unit,
+    batteryUnrestricted: Boolean,
+    onOpenBatterySettings: () -> Unit
 ) {
     val surfaceColor = MaterialTheme.colorScheme.surface
     val outlineVariant = MaterialTheme.colorScheme.outlineVariant
@@ -287,6 +289,24 @@ internal fun WebappNotificationsSection(
                 summary = "While the official Hermes Agent Webapp is open, keep its connection alive when you switch apps so progress is there when you return. Android shows a quiet ongoing notification.",
                 checked = settings.keepAlive,
                 onCheckedChange = { onChange(settings.copy(keepAlive = it)) }
+            )
+            HorizontalDivider(color = outlineVariant.copy(alpha = 0.5f))
+            ListItem(
+                headlineContent = { Text("Unrestricted battery use", fontWeight = FontWeight.Medium) },
+                supportingContent = {
+                    Text(
+                        if (batteryUnrestricted) {
+                            "On. Android will not put Hermes to sleep while it stays connected."
+                        } else {
+                            "Off. Samsung and other phones may close Hermes in the background and drop the connection. Tap to allow."
+                        },
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                },
+                trailingContent = { Icon(Icons.Filled.ChevronRight, contentDescription = null) },
+                colors = ListItemDefaults.colors(containerColor = surfaceColor),
+                modifier = Modifier.clickable(onClick = onOpenBatterySettings)
             )
             HorizontalDivider(color = outlineVariant.copy(alpha = 0.5f))
             WebappSwitchRow(

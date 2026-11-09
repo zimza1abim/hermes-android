@@ -139,7 +139,8 @@ class WebViewSecurityContractTest {
             "android.permission.RECORD_AUDIO",
             "android.permission.MODIFY_AUDIO_SETTINGS",
             "android.permission.POST_NOTIFICATIONS",
-            "android.permission.ACCESS_LOCAL_NETWORK"
+            "android.permission.ACCESS_LOCAL_NETWORK",
+            "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
         ).forEach { assertWithMessage(it).that(declared).contains(it) }
     }
 
@@ -172,6 +173,16 @@ class WebViewSecurityContractTest {
         val keepAlive = codeOnly.entries.single { it.key.endsWith("background/HermesKeepAliveService.kt") }.value
         assertThat(keepAlive).contains("ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE")
         assertThat(keepAlive).doesNotContain("FOREGROUND_SERVICE_TYPE_DATA_SYNC")
+    }
+
+    @Test
+    fun `the battery exemption is asked only from the Settings row, never automatically`() {
+        val all = codeOnly.values.joinToString("\n")
+        assertThat(Regex("""ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS""").findAll(all).count()).isEqualTo(1)
+        val activity = codeOnly.entries.single { it.key.endsWith("/MainActivity.kt") }.value
+        assertThat(activity).contains("private fun openBatteryOptimizationSettings()")
+        assertThat(activity).contains("onOpenBatterySettings = ::openBatteryOptimizationSettings")
+        assertThat(Regex("""\bopenBatteryOptimizationSettings\b""").findAll(activity).count()).isEqualTo(2)
     }
 
     @Test

@@ -151,7 +151,9 @@ fun SettingsScreen(
     onClearServerValidation: () -> Unit,
     modifier: Modifier = Modifier,
     launcherIcon: LauncherIcon = LauncherIcon.DEFAULT,
-    onSetLauncherIcon: (LauncherIcon) -> Unit = {}
+    onSetLauncherIcon: (LauncherIcon) -> Unit = {},
+    batteryUnrestricted: Boolean = true,
+    onOpenBatterySettings: () -> Unit = {}
 ) {
     BackHandler(onBack = onDismiss)
 
@@ -882,7 +884,9 @@ fun SettingsScreen(
                 WebappNotificationsSection(
                     settings = webappBackground,
                     onChange = onSetWebappBackground,
-                    onOpenChannel = onOpenNotificationChannel
+                    onOpenChannel = onOpenNotificationChannel,
+                    batteryUnrestricted = batteryUnrestricted,
+                    onOpenBatterySettings = onOpenBatterySettings
                 )
 
                 Spacer(modifier = Modifier.height(16.dp))

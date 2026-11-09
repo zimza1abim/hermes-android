@@ -100,7 +100,10 @@ open prompts disappear when you return, because the page shows them itself.
 Change this in **Application Settings > Notifications**: stay connected in
 the background, show or hide message previews (the lock screen always hides
 them), turn each kind of alert on or off, and open Android's sound and
-vibration settings for each kind. The connection has no daily time limit:
+vibration settings for each kind. **Unrestricted battery use** shows whether
+Android exempts Hermes from battery optimization and opens the system prompt
+when it does not; Samsung and some other phones close optimized apps in the
+background even while they show the ongoing notification. The connection has no daily time limit:
 it stays up until you close the page, turn the setting off or Android stops
 the app. Hermes WebUI keeps its own background options.
 

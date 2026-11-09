@@ -367,6 +367,16 @@ class SettingsScreenTest {
         assertThat(opened).containsExactly(GatewayAlertKind.CLARIFY.channelId, null).inOrder()
     }
 
+    @Test
+    fun webappBatteryRow_showsTheExemptionAndOpensBatterySettings() {
+        var opened = 0
+        renderConfiguredSettings(seconds = 1, batteryUnrestricted = false, onOpenBatterySettings = { opened++ })
+
+        composeTestRule.onNodeWithText("Off.", substring = true).performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithText("Unrestricted battery use").performScrollTo().performClick()
+        assertThat(opened).isEqualTo(1)
+    }
+
     private fun renderConfiguredSettings(
         seconds: Int,
         clientCertificateUri: String? = null,
@@ -375,7 +385,9 @@ class SettingsScreenTest {
         onShowWelcome: () -> Unit = {},
         webappBackground: WebappBackgroundSettings = WebappBackgroundSettings(),
         onSetWebappBackground: (WebappBackgroundSettings) -> Unit = {},
-        onOpenNotificationChannel: (String?) -> Unit = {}
+        onOpenNotificationChannel: (String?) -> Unit = {},
+        batteryUnrestricted: Boolean = true,
+        onOpenBatterySettings: () -> Unit = {}
     ) {
         composeTestRule.setContent {
             SettingsScreen(
@@ -433,7 +445,9 @@ class SettingsScreenTest {
                 onEditCurrentServer = { _, _, _ -> },
                 onSwitchProfile = {},
                 onReconnectCurrentServer = {},
-                onClearServerValidation = {}
+                onClearServerValidation = {},
+                batteryUnrestricted = batteryUnrestricted,
+                onOpenBatterySettings = onOpenBatterySettings
             )
         }
     }

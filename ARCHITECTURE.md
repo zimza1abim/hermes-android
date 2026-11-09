@@ -226,6 +226,12 @@ Android keeps the WebView alive instead of relaying the socket.
   (manifest subtype property) with a minimum-importance notification. Unlike
   `dataSync` it has no Android 15+ daily run-time limit, so it has no
   `onTimeout` path. The WebUI reconnect service stays `dataSync`.
+- Battery optimization is Android-owned state. `MainActivity` reads
+  `PowerManager.isIgnoringBatteryOptimizations` into a Compose snapshot on
+  every resume and the Notifications section shows it. Only a tap on that row
+  opens `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` (or the optimization list
+  when already exempt, or as a fallback); nothing prompts automatically, and
+  `WebViewSecurityContractTest` pins that.
 
 ## Reverse-proxy authentication
 
