@@ -8,13 +8,13 @@ class AlertGroupsTest {
     private val s2 = AlertGroups.key("s2")
 
     private fun shown(id: Int, group: String, title: String, at: Long, channel: String = "c$id") =
-        ShownAlert(id, group, title, channel, at)
+        ShownAlert(id, group, "Chat", title, channel, at)
 
     @Test
     fun `a session with two alerts gets a summary listing the newest first`() {
         val children = listOf(shown(1, s1, "Task finished", 10), shown(2, s1, "Hermes has a question", 20), shown(3, s2, "Task failed", 5))
         val plan = AlertGroups.plan(children, summarized = emptySet(), touched = setOf(s1, s2))
-        assertThat(plan.post).containsExactly(GroupSummary(s1, "s1", 2, listOf("Hermes has a question", "Task finished"), "c2"))
+        assertThat(plan.post).containsExactly(GroupSummary(s1, "s1", "Chat", 2, listOf("Hermes has a question", "Task finished"), "c2"))
         assertThat(plan.cancel).isEmpty()
     }
 

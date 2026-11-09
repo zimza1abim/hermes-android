@@ -42,6 +42,7 @@ sealed interface GatewayEvent {
 
     data class BackgroundCompleted(override val sessionId: String, val text: String?) : GatewayEvent
 
+    /** The chat's title, from `session.title` or the title in `session.info`; never blank. */
     data class SessionTitled(override val sessionId: String, val title: String) : GatewayEvent
 
     /** Matches the `request_id` of each approval it withdraws; empty withdraws every approval in the session. */
@@ -88,7 +89,7 @@ object GatewayProtocol {
      * contains one, so the parser and the filter cannot drift apart.
      */
     val WATCHED_MARKERS: List<String> =
-        listOf("message.complete", "approval", "clarify", "background.complete", "session.title")
+        listOf("message.complete", "approval", "clarify", "background.complete", "session.title", "session.info")
 
     fun parseInbound(raw: String): GatewayEvent? {
         val frame = parseObject(raw) ?: return null
@@ -141,7 +142,7 @@ object GatewayProtocol {
                 )
             }
             "background.complete" -> GatewayEvent.BackgroundCompleted(sessionId, string(payload, "text"))
-            "session.title" -> string(payload, "title")?.let { GatewayEvent.SessionTitled(sessionId, it) }
+            "session.title", "session.info" -> string(payload, "title")?.let { GatewayEvent.SessionTitled(sessionId, it.trim()) }
             "approval.cancelled" -> GatewayEvent.ApprovalCancelled(
                 sessionId,
                 strings(payload.optJSONArray("request_ids")).toSet(),

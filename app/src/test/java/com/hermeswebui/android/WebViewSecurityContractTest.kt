@@ -244,7 +244,7 @@ class WebViewSecurityContractTest {
     @Test
     fun `webapp alerts and their session summaries stay private on the lock screen`() {
         val coordinator = codeOnly.entries.single { it.key.endsWith("webapp/WebappGatewayCoordinator.kt") }.value
-        listOf("private fun notify(alert: Alert)", "private fun notifySummary(summary: GroupSummary)").forEach { signature ->
+        listOf("private fun notify(alert: Alert, update: Boolean)", "private fun notifySummary(summary: GroupSummary)").forEach { signature ->
             val body = bodiesOf(coordinator, signature).single()
             assertWithMessage(signature).that(body).contains(".setVisibility(NotificationCompat.VISIBILITY_PRIVATE)")
             assertWithMessage(signature).that(body).contains(".setPublicVersion(publicVersion)")

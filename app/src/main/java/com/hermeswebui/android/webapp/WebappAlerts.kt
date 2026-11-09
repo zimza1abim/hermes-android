@@ -97,8 +97,10 @@ data class OpenPrompt(
 data class GatewayDocument(
     val id: DocId,
     val prompts: Map<PromptKey, OpenPrompt> = emptyMap(),
-    /** sessionId to title, newest last, bounded to [MAX_TITLES]. */
+    /** sessionId to chat title, newest last, bounded to [MAX_TITLES]. */
     val titles: Map<String, String> = emptyMap(),
+    /** One-shot alerts posted with a preview, newest last, so a title that arrives later can retitle them. */
+    val oneShots: Map<Pair<GatewayAlertKind, String>, Alert> = emptyMap(),
 ) {
     companion object {
         const val MAX_TITLES = 32
@@ -137,14 +139,19 @@ sealed interface TrayReply {
     data class Reply(val text: String) : TrayReply
 }
 
-/** What the shell renders. The body is already removed when previews are off. */
+/** Why an alert was posted; the shell shows it as the notification's short subtext. */
+enum class AlertReason { COMPLETE, ERROR, INTERRUPTED, APPROVAL, QUESTION, BACKGROUND }
+
+/** What the shell renders. The title and body are already removed when previews are off. */
 data class Alert(
     val kind: GatewayAlertKind,
     /** Replaces per key: the session id for one-shot kinds, the encoded [PromptKey] for prompts. */
     val key: String,
     /** A tap asks the page to open this session. */
     val sessionId: String,
-    val title: String,
+    val reason: AlertReason,
+    /** The chat title, else the detail's first line; null shows the app name. */
+    val title: String?,
     val body: String?,
     /** Null when the alert is tap-only. */
     val actions: AlertActions?,
@@ -168,7 +175,8 @@ sealed interface WebappInput {
 }
 
 sealed interface WebappEffect {
-    data class Post(val alert: Alert) : WebappEffect
+    /** [update] replaces an alert already in the tray: silently, and only if it is still shown. */
+    data class Post(val alert: Alert, val update: Boolean = false) : WebappEffect
     data class Cancel(val kind: GatewayAlertKind, val key: String) : WebappEffect
     data class Send(val doc: DocId, val sock: Int, val prompt: PromptKey, val frame: String) : WebappEffect
     data class KeepAlive(val on: Boolean) : WebappEffect
@@ -183,7 +191,8 @@ sealed interface WebappEffect {
  *  - Shown prompt notifications are exactly the open prompts that are not sending and whose kind
  *    is enabled, while hidden. Prompt posts and cancels come only from diffing that set before and
  *    after each input, so no path can leave a stale Allow/Deny in the tray.
- *  - One-shot alerts are posted only while hidden and enabled.
+ *  - One-shot alerts are posted only while hidden and enabled; a chat title that arrives later
+ *    only updates them in place.
  *  - Only [WebappInput.Hello] changes the document; any other input naming another document is dropped.
  *  - A send is emitted only for an open prompt that is not already sending, and only for a reply
  *    that matches what the prompt offers: a decision for an approval, a choice or text for a
@@ -196,6 +205,15 @@ object WebappAlertReducer {
     private const val MAX_DETAIL = 1_000
     const val MAX_CHOICE_ACTIONS = 3
     private const val MAX_REPLY = 4_000
+    const val MAX_TITLE = 60
+
+    /** The chat title, else the first non-blank line of [detail] capped at [MAX_TITLE]; null with previews off. */
+    fun alertTitle(chatTitle: String?, detail: String?, preview: Boolean): String? {
+        if (!preview) return null
+        chatTitle?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+        val line = detail?.lineSequence()?.map { it.trim() }?.firstOrNull { it.isNotEmpty() } ?: return null
+        return if (line.length <= MAX_TITLE) line else line.take(MAX_TITLE - 1).trimEnd() + "…"
+    }
 
     fun reduce(state: WebappState, input: WebappInput): Pair<WebappState, List<WebappEffect>> {
         val (applied, actions) = apply(state, input)
@@ -257,13 +275,23 @@ object WebappAlertReducer {
             state.withPrompts(doc, remaining) to emptyList()
         }
         is GatewayEvent.SessionTitled -> {
-            val titles = (doc.titles - event.sessionId + (event.sessionId to event.title))
-                .entries.toList().takeLast(GatewayDocument.MAX_TITLES).associate { it.key to it.value }
-            state.copy(doc = doc.copy(titles = titles)) to emptyList()
+            val titles = (doc.titles - event.sessionId + (event.sessionId to event.title)).newest()
+            val retitled = doc.oneShots.filterValues { it.sessionId == event.sessionId && it.title != event.title }
+                .mapValues { (_, alert) -> alert.copy(title = event.title) }
+                .takeIf { state.settings.showPreview }.orEmpty()
+            state.copy(doc = doc.copy(titles = titles, oneShots = doc.oneShots + retitled)) to
+                retitled.values.map { WebappEffect.Post(it, update = true) }
         }
-        is GatewayEvent.TurnEnded, is GatewayEvent.BackgroundCompleted ->
-            state to listOfNotNull(oneShotAlert(state, doc, event)?.let(WebappEffect::Post))
+        is GatewayEvent.TurnEnded, is GatewayEvent.BackgroundCompleted -> {
+            val alert = oneShotAlert(state, doc, event)
+            val oneShots = if (alert == null || !state.settings.showPreview) doc.oneShots
+            else (doc.oneShots - (alert.kind to alert.key) + ((alert.kind to alert.key) to alert)).newest()
+            state.copy(doc = doc.copy(oneShots = oneShots)) to listOfNotNull(alert?.let(WebappEffect::Post))
+        }
     }
+
+    private fun <K, V> Map<K, V>.newest(): Map<K, V> =
+        entries.toList().takeLast(GatewayDocument.MAX_TITLES).associate { it.key to it.value }
 
     private fun trayAnswer(state: WebappState, input: WebappInput.TrayAnswer): Pair<WebappState, List<WebappEffect>> {
         val doc = state.docFor(input.target.doc) ?: return state to emptyList()
@@ -313,30 +341,30 @@ object WebappAlertReducer {
     }
 
     private fun oneShotAlert(state: WebappState, doc: GatewayDocument, event: GatewayEvent): Alert? {
-        val (kind, headline, detail) = when (event) {
+        val (kind, reason, detail) = when (event) {
             is GatewayEvent.TurnEnded -> when (event.outcome) {
-                TurnOutcome.COMPLETE -> Triple(GatewayAlertKind.TURN_COMPLETE, "Task finished", event.text)
-                TurnOutcome.ERROR -> Triple(GatewayAlertKind.TURN_FAILED, "Task failed", event.error ?: event.text)
-                TurnOutcome.INTERRUPTED -> Triple(GatewayAlertKind.TURN_FAILED, "Task stopped", event.error ?: event.text)
+                TurnOutcome.COMPLETE -> Triple(GatewayAlertKind.TURN_COMPLETE, AlertReason.COMPLETE, event.text)
+                TurnOutcome.ERROR -> Triple(GatewayAlertKind.TURN_FAILED, AlertReason.ERROR, event.error ?: event.text)
+                TurnOutcome.INTERRUPTED -> Triple(GatewayAlertKind.TURN_FAILED, AlertReason.INTERRUPTED, event.error ?: event.text)
             }
             is GatewayEvent.BackgroundCompleted ->
-                Triple(GatewayAlertKind.BACKGROUND_COMPLETE, "Background task finished", event.text)
+                Triple(GatewayAlertKind.BACKGROUND_COMPLETE, AlertReason.BACKGROUND, event.text)
             else -> return null
         }
         if (state.visible || !state.settings.isEnabled(kind)) return null
-        return alert(state, doc, kind, event.sessionId, event.sessionId, headline, detail, actions = null)
+        return alert(state, doc, kind, event.sessionId, event.sessionId, reason, detail, actions = null)
     }
 
     private fun promptAlert(state: WebappState, doc: GatewayDocument, key: PromptKey, prompt: OpenPrompt): Alert {
         val encoded = key.encode()
         return when (val request = prompt.request) {
             is GatewayEvent.ApprovalRequested -> alert(
-                state, doc, GatewayAlertKind.APPROVAL, encoded, request.sessionId, "Approval needed",
+                state, doc, GatewayAlertKind.APPROVAL, encoded, request.sessionId, AlertReason.APPROVAL,
                 request.command ?: request.description ?: request.toolName,
                 AlertActions.Decide(AnswerTarget(doc.id, key)),
             )
             is GatewayEvent.ClarifyRequested -> alert(
-                state, doc, GatewayAlertKind.CLARIFY, encoded, request.sessionId, "Hermes has a question",
+                state, doc, GatewayAlertKind.CLARIFY, encoded, request.sessionId, AlertReason.QUESTION,
                 clarifyDetail(request), clarifyActions(state, request, AnswerTarget(doc.id, key)),
             )
         }
@@ -348,17 +376,17 @@ object WebappAlertReducer {
         kind: GatewayAlertKind,
         key: String,
         sessionId: String,
-        headline: String,
+        reason: AlertReason,
         detail: String?,
         actions: AlertActions?,
     ): Alert {
         val preview = state.settings.showPreview
-        val sessionTitle = doc.titles[sessionId]?.takeIf { preview }
         return Alert(
             kind = kind,
             key = key,
             sessionId = sessionId,
-            title = if (sessionTitle != null) "$headline · $sessionTitle" else headline,
+            reason = reason,
+            title = alertTitle(doc.titles[sessionId], detail, preview),
             body = detail?.takeIf { preview }?.trim()?.take(MAX_DETAIL)?.ifEmpty { null },
             actions = actions,
         )
@@ -368,7 +396,8 @@ object WebappAlertReducer {
         val old = promptAlerts(before)
         val new = promptAlerts(after)
         val cancels = (old.keys - new.keys).map { (kind, key) -> WebappEffect.Cancel(kind, key) }
-        val posts = new.filter { (slot, alert) -> old[slot] != alert }.values.map(WebappEffect::Post)
+        val posts = new.filter { (slot, alert) -> old[slot] != alert }
+            .map { (slot, alert) -> WebappEffect.Post(alert, update = slot in old) }
         return cancels + posts
     }
 

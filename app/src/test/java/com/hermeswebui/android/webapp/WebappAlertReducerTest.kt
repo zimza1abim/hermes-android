@@ -77,7 +77,7 @@ class WebappAlertReducerTest {
     fun `one-shot alerts post only while hidden and enabled`() {
         assertThat(effectsOf(Hello(doc), Inbound(doc, 1, completed))).isEmpty()
         val posted = effectsOf(*hidden, Inbound(doc, 1, completed)).single() as Post
-        assertThat(posted.alert).isEqualTo(Alert(GatewayAlertKind.TURN_COMPLETE, "s1", "s1", "Task finished", "All done", null))
+        assertThat(posted.alert).isEqualTo(Alert(GatewayAlertKind.TURN_COMPLETE, "s1", "s1", AlertReason.COMPLETE, "All done", "All done", null))
         val disabled = WebappBackgroundSettings(disabled = setOf(GatewayAlertKind.TURN_COMPLETE))
         assertThat(effectsOf(*hidden, SettingsChanged(disabled), Inbound(doc, 1, completed))).isEmpty()
     }
@@ -88,25 +88,61 @@ class WebappAlertReducerTest {
         val stopped = GatewayEvent.TurnEnded("s1", TurnOutcome.INTERRUPTED, null, null)
         val background = GatewayEvent.BackgroundCompleted("s2", "Report ready")
         fun alertFor(event: GatewayEvent) = (effectsOf(*hidden, Inbound(doc, 1, event)).single() as Post).alert
-        assertThat(alertFor(failed)).isEqualTo(Alert(GatewayAlertKind.TURN_FAILED, "s1", "s1", "Task failed", "boom", null))
-        assertThat(alertFor(stopped)).isEqualTo(Alert(GatewayAlertKind.TURN_FAILED, "s1", "s1", "Task stopped", null, null))
+        assertThat(alertFor(failed)).isEqualTo(Alert(GatewayAlertKind.TURN_FAILED, "s1", "s1", AlertReason.ERROR, "boom", "boom", null))
+        assertThat(alertFor(stopped)).isEqualTo(Alert(GatewayAlertKind.TURN_FAILED, "s1", "s1", AlertReason.INTERRUPTED, null, null, null))
         assertThat(alertFor(background))
-            .isEqualTo(Alert(GatewayAlertKind.BACKGROUND_COMPLETE, "s2", "s2", "Background task finished", "Report ready", null))
+            .isEqualTo(Alert(GatewayAlertKind.BACKGROUND_COMPLETE, "s2", "s2", AlertReason.BACKGROUND, "Report ready", "Report ready", null))
     }
 
     @Test
-    fun `preview off strips the body and the session title`() {
+    fun `preview off strips the body and the chat title`() {
         val noPreview = SettingsChanged(WebappBackgroundSettings(showPreview = false))
         val titled = Inbound(doc, 1, GatewayEvent.SessionTitled("s1", "Fix the build"))
         val turn = (effectsOf(*hidden, titled, noPreview, Inbound(doc, 1, completed)).single() as Post).alert
-        assertThat(turn.title).isEqualTo("Task finished")
+        assertThat(turn.title).isNull()
         assertThat(turn.body).isNull()
         val prompt = (effectsOf(*hidden, titled, noPreview, Inbound(doc, 1, approval)).single() as Post).alert
-        assertThat(prompt.title).isEqualTo("Approval needed")
+        assertThat(prompt.title).isNull()
         assertThat(prompt.body).isNull()
 
         val withTitle = (effectsOf(*hidden, titled, Inbound(doc, 1, completed)).single() as Post).alert
-        assertThat(withTitle.title).isEqualTo("Task finished · Fix the build")
+        assertThat(withTitle.title).isEqualTo("Fix the build")
+        assertThat(withTitle.reason).isEqualTo(AlertReason.COMPLETE)
+    }
+
+    @Test
+    fun `the title is the chat title, else the detail's first line, else none`() {
+        assertThat(WebappAlertReducer.alertTitle("Fix the build", "Done", preview = true)).isEqualTo("Fix the build")
+        assertThat(WebappAlertReducer.alertTitle(null, "\n  \n  First line  \nsecond", preview = true)).isEqualTo("First line")
+        assertThat(WebappAlertReducer.alertTitle(" ", "Done", preview = true)).isEqualTo("Done")
+        assertThat(WebappAlertReducer.alertTitle(null, " \n ", preview = true)).isNull()
+        assertThat(WebappAlertReducer.alertTitle(null, null, preview = true)).isNull()
+        assertThat(WebappAlertReducer.alertTitle("Fix the build", "Done", preview = false)).isNull()
+        val long = WebappAlertReducer.alertTitle(null, "x".repeat(200), preview = true)!!
+        assertThat(long).hasLength(WebappAlertReducer.MAX_TITLE)
+        assertThat(long).endsWith("…")
+    }
+
+    @Test
+    fun `a title that arrives later updates shown alerts in place`() {
+        val titled = Inbound(doc, 1, GatewayEvent.SessionTitled("s1", "Fix the build"))
+        val effects = effectsOf(*hidden, Inbound(doc, 1, completed), Inbound(doc, 1, approval), titled)
+        assertThat(effects).containsExactly(
+            Post(Alert(GatewayAlertKind.TURN_COMPLETE, "s1", "s1", AlertReason.COMPLETE, "Fix the build", "All done", null), update = true),
+            Post(
+                Alert(
+                    GatewayAlertKind.APPROVAL, approvalKey.encode(), "s1", AlertReason.APPROVAL, "Fix the build",
+                    "rm -rf build", AlertActions.Decide(AnswerTarget(doc, approvalKey)),
+                ),
+                update = true,
+            ),
+        )
+        assertThat(effectsOf(*hidden, Inbound(doc, 1, completed), titled, titled)).isEmpty()
+        assertThat(effectsOf(*hidden, Inbound(doc, 1, completed), Inbound(doc, 1, GatewayEvent.SessionTitled("s2", "Other")))).isEmpty()
+        val noPreview = SettingsChanged(WebappBackgroundSettings(showPreview = false))
+        assertThat(effectsOf(*hidden, noPreview, Inbound(doc, 1, completed), titled)).isEmpty()
+        assertThat(effectsOf(*hidden, Inbound(doc, 1, completed), Hello(DocId("doc-b")), Visibility(false),
+            Inbound(DocId("doc-b"), 1, GatewayEvent.SessionTitled("s1", "Fix the build")))).isEmpty()
     }
 
     @Test
@@ -119,11 +155,11 @@ class WebappAlertReducerTest {
     fun `an approval shows with an answer target while hidden`() {
         val alert = (effectsOf(*hidden, Inbound(doc, 1, approval)).single() as Post).alert
         assertThat(alert).isEqualTo(
-            Alert(GatewayAlertKind.APPROVAL, approvalKey.encode(), "s1", "Approval needed", "rm -rf build", AlertActions.Decide(AnswerTarget(doc, approvalKey)))
+            Alert(GatewayAlertKind.APPROVAL, approvalKey.encode(), "s1", AlertReason.APPROVAL, "rm -rf build", "rm -rf build", AlertActions.Decide(AnswerTarget(doc, approvalKey)))
         )
         val question = (effectsOf(*hidden, Inbound(doc, 1, clarify)).single() as Post).alert
         assertThat(question).isEqualTo(
-            Alert(GatewayAlertKind.CLARIFY, clarifyKey.encode(), "s1", "Hermes has a question", "Which branch?", AlertActions.Reply(AnswerTarget(doc, clarifyKey)))
+            Alert(GatewayAlertKind.CLARIFY, clarifyKey.encode(), "s1", AlertReason.QUESTION, "Which branch?", "Which branch?", AlertActions.Reply(AnswerTarget(doc, clarifyKey)))
         )
     }
 

@@ -175,7 +175,7 @@ class WebappGatewayCoordinator(
 
     private fun execute(effect: WebappEffect) {
         when (effect) {
-            is WebappEffect.Post -> notify(effect.alert)
+            is WebappEffect.Post -> notify(effect.alert, effect.update)
             is WebappEffect.Cancel -> {
                 val id = effect.kind.notificationId(effect.key)
                 NotificationManagerCompat.from(activity).cancel(GatewayAlertKind.ALERT_TAG, id)
@@ -282,18 +282,23 @@ class WebappGatewayCoordinator(
     }
 
     @SuppressLint("MissingPermission")
-    private fun notify(alert: Alert) {
+    private fun notify(alert: Alert, update: Boolean) {
         if (!HermesKeepAliveService.canPostNotifications(activity)) return
-        val headline = alert.kind.label
+        val id = alert.kind.notificationId(alert.key)
+        if (update && !isShown(id)) return
+        val title = alert.title ?: activity.getString(R.string.app_name)
+        val reason = activity.getString(alert.reason.labelRes)
         val publicVersion = NotificationCompat.Builder(activity, alert.kind.channelId)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(activity.getString(R.string.app_name))
-            .setContentText(headline)
+            .setContentText(reason)
             .build()
         val builder = NotificationCompat.Builder(activity, alert.kind.channelId)
             .setSmallIcon(R.drawable.ic_notification)
             .setColor(ContextCompat.getColor(activity, R.color.brand_sky))
-            .setContentTitle(alert.title)
+            .setContentTitle(title)
+            .setSubText(reason)
+            .setOnlyAlertOnce(update)
             .setContentIntent(
                 HermesKeepAliveService.openAppIntent(activity, alert.sessionId, alert.kind.notificationId(alert.key))
             )
@@ -335,15 +340,24 @@ class WebappGatewayCoordinator(
             )
             null -> Unit
         }
-        val id = alert.kind.notificationId(alert.key)
         val posted = runCatching {
             NotificationManagerCompat.from(activity).notify(GatewayAlertKind.ALERT_TAG, id, builder.build())
         }.isSuccess
         if (posted) {
             trayChanges[id] = ShownAlert(
-                id, AlertGroups.key(alert.sessionId), alert.title, alert.kind.channelId, System.currentTimeMillis()
+                id, AlertGroups.key(alert.sessionId), title, digest(reason, alert.body), alert.kind.channelId,
+                System.currentTimeMillis(),
             )
         }
+    }
+
+    /** Whether alert [id] is in the tray, counting this dispatch's own posts and cancels. */
+    private fun isShown(id: Int): Boolean {
+        if (id in trayChanges) return trayChanges[id] != null
+        return runCatching {
+            activity.getSystemService(NotificationManager::class.java)?.activeNotifications
+                ?.any { it.tag == GatewayAlertKind.ALERT_TAG && it.id == id }
+        }.getOrNull() == true
     }
 
     /**
@@ -365,7 +379,7 @@ class WebappGatewayCoordinator(
 
     @SuppressLint("MissingPermission")
     private fun notifySummary(summary: GroupSummary) {
-        val text = "${summary.count} updates"
+        val text = activity.resources.getQuantityString(R.plurals.webapp_alert_summary_count, summary.count, summary.count)
         val publicVersion = NotificationCompat.Builder(activity, summary.channelId)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(activity.getString(R.string.app_name))
@@ -376,7 +390,7 @@ class WebappGatewayCoordinator(
         val notification = NotificationCompat.Builder(activity, summary.channelId)
             .setSmallIcon(R.drawable.ic_notification)
             .setColor(ContextCompat.getColor(activity, R.color.brand_sky))
-            .setContentTitle(activity.getString(R.string.app_name))
+            .setContentTitle(summary.title)
             .setContentText(text)
             .setStyle(style)
             .setGroup(summary.group)
@@ -444,9 +458,28 @@ class WebappGatewayCoordinator(
 
         private fun StatusBarNotification.toShownAlert(): ShownAlert? {
             val group = notification.group ?: return null
-            val title = notification.extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
-            return ShownAlert(id, group, title, notification.channelId, postTime)
+            val extras = notification.extras
+            val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
+            val reason = extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString().orEmpty()
+            val body = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()
+            return ShownAlert(id, group, title, digest(reason, body), notification.channelId, postTime)
         }
+
+        /** A summary line: the reason, then the body's first line when previews show one. */
+        private fun digest(reason: String, body: String?): String {
+            val first = body?.lineSequence()?.map { it.trim() }?.firstOrNull { it.isNotEmpty() }
+            return if (first == null) reason else "$reason · $first"
+        }
+
+        private val AlertReason.labelRes: Int
+            get() = when (this) {
+                AlertReason.COMPLETE -> R.string.webapp_alert_complete
+                AlertReason.ERROR -> R.string.webapp_alert_error
+                AlertReason.INTERRUPTED -> R.string.webapp_alert_interrupted
+                AlertReason.APPROVAL -> R.string.webapp_alert_approval
+                AlertReason.QUESTION -> R.string.webapp_alert_question
+                AlertReason.BACKGROUND -> R.string.webapp_alert_background
+            }
 
         /** One channel per [GatewayAlertKind] plus the keep-alive channel, grouped as "Hermes Agent". */
         fun createChannels(context: Context) {

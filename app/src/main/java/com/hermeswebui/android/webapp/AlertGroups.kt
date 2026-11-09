@@ -1,10 +1,20 @@
 package com.hermeswebui.android.webapp
 
-/** A gateway alert the tray shows, reduced to what grouping needs. */
-data class ShownAlert(val id: Int, val group: String, val title: String, val channelId: String, val postedAt: Long)
+/** A gateway alert the tray shows, reduced to what grouping needs: its title and a one-line digest. */
+data class ShownAlert(val id: Int, val group: String, val title: String, val line: String, val channelId: String, val postedAt: Long)
 
-/** A per-session summary; its lines are the newest child titles, already privacy-filtered. */
-data class GroupSummary(val group: String, val sessionId: String, val count: Int, val lines: List<String>, val channelId: String)
+/**
+ * A per-session summary, titled like its newest child, listing the newest child digests; both are
+ * already privacy-filtered.
+ */
+data class GroupSummary(
+    val group: String,
+    val sessionId: String,
+    val title: String,
+    val count: Int,
+    val lines: List<String>,
+    val channelId: String,
+)
 
 data class GroupPlan(val post: List<GroupSummary>, val cancel: List<String>)
 
@@ -31,8 +41,9 @@ object AlertGroups {
             GroupSummary(
                 group = group,
                 sessionId = group.removePrefix(PREFIX),
+                title = shown.first().title,
                 count = shown.size,
-                lines = shown.take(MAX_LINES).map { it.title },
+                lines = shown.take(MAX_LINES).map { it.line },
                 channelId = shown.first().channelId,
             )
         }

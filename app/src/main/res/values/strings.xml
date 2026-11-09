@@ -83,4 +83,15 @@
 
     <string name="welcome_settings_entry">Show welcome guide</string>
     <string name="welcome_settings_entry_hint">A quick tour of what Hermes-Android does and how to get set up.</string>
+
+    <string name="webapp_alert_complete">Finished</string>
+    <string name="webapp_alert_error">Failed</string>
+    <string name="webapp_alert_interrupted">Stopped</string>
+    <string name="webapp_alert_approval">Approval needed</string>
+    <string name="webapp_alert_question">Question</string>
+    <string name="webapp_alert_background">Background task done</string>
+    <plurals name="webapp_alert_summary_count">
+        <item quantity="one">%d update</item>
+        <item quantity="other">%d updates</item>
+    </plurals>
 </resources>

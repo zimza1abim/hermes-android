@@ -41,6 +41,8 @@ class GatewayProtocolTest {
                 GatewayEvent.BackgroundCompleted("s1", "Report ready"),
             event("session.title", """{"title":"Fix the build"}""") to
                 GatewayEvent.SessionTitled("s1", "Fix the build"),
+            event("session.info", """{"model":"m","tools":{},"skills":{},"cwd":"/w","title":" Fix the build ","running":false}""") to
+                GatewayEvent.SessionTitled("s1", "Fix the build"),
         )
     }
 
@@ -64,6 +66,8 @@ class GatewayProtocolTest {
             event("message.delta", """{"text":"partial"}"""),
             event("message.complete", """{"status":"exploded"}"""),
             event("session.title", """{}"""),
+            event("session.info", """{"model":"m","title":""}"""),
+            event("session.info", """{"model":"m"}"""),
             """{"jsonrpc":"2.0","method":"event","params":{"type":"message.complete","payload":{}}}""",
             """{"jsonrpc":"2.0","method":"approval","params":{"session_id":"s1"}}""",
             """{"jsonrpc":"2.0","id":1.5,"method":"approval","params":{"session_id":"s1"}}""",
