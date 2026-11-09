@@ -236,6 +236,17 @@ Android keeps the WebView alive instead of relaying the socket.
   restore on `sendFailed`). Every clarify action requires device unlock. The
   reply PendingIntent is the only mutable one, because Android writes the
   typed text into it; it stays package-scoped to the same receiver.
+- Alerts are grouped per session (`AlertGroups.key(sessionId)`); body text
+  uses BigText. After each dispatch that posted or cancelled an alert, the
+  coordinator reads the tray back from Android, overlays that dispatch's own
+  posts and cancels (Android applies them asynchronously) and runs the pure
+  `AlertGroups.plan`: a touched session showing two or more alerts gets a
+  silent summary (`GROUP_ALERT_CHILDREN`, InboxStyle of the newest child
+  titles, private with a redacted public version, tap opens that session),
+  and a summary is withdrawn only once its group is empty, because cancelling
+  a summary also cancels its children. Returning to the app sweeps summaries
+  left empty by taps or swipes. Child titles are already preview-filtered, so
+  previews off never leak into a summary.
 - The shared notification facade (`HermesWebUiScripts.buildNotificationBridgeScript`)
   does not post a page notification whose tag starts with `hermes:` while
   `window.__HERMES_UI_SURFACE__ === 'webapp'` (read when the notification is

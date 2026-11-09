@@ -97,6 +97,7 @@ A question with one to three choices gets a button per choice, and any other
 single question gets a **Reply** box; both need an unlocked phone and are
 answered the same way. A question set with several questions opens the app
 when tapped. With previews hidden, question alerts have no answer buttons.
+Alerts from the same session are grouped, with a summary once there are two.
 Tapping an alert brings Hermes back without reloading the page and opens
 that alert's session when the page has its own notification for it. Alerts for
 open prompts disappear when you return, because the page shows them itself.

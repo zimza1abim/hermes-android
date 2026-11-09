@@ -242,6 +242,18 @@ class WebViewSecurityContractTest {
     }
 
     @Test
+    fun `webapp alerts and their session summaries stay private on the lock screen`() {
+        val coordinator = codeOnly.entries.single { it.key.endsWith("webapp/WebappGatewayCoordinator.kt") }.value
+        listOf("private fun notify(alert: Alert)", "private fun notifySummary(summary: GroupSummary)").forEach { signature ->
+            val body = bodiesOf(coordinator, signature).single()
+            assertWithMessage(signature).that(body).contains(".setVisibility(NotificationCompat.VISIBILITY_PRIVATE)")
+            assertWithMessage(signature).that(body).contains(".setPublicVersion(publicVersion)")
+        }
+        val summary = bodiesOf(coordinator, "private fun notifySummary(summary: GroupSummary)").single()
+        assertThat(summary).contains(".setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)")
+    }
+
+    @Test
     fun `webapp bridge messages are trust-checked before parsing and taps never load a url`() {
         val coordinator = codeOnly.entries.single { it.key.endsWith("webapp/WebappGatewayCoordinator.kt") }.value
         val handler = bodiesOf(coordinator, "private fun onBridgeMessage(").single()
