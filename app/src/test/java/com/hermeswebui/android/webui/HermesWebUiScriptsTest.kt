@@ -1,6 +1,8 @@
 package com.hermeswebui.android.webui
 
 import com.google.common.truth.Truth.assertThat
+import com.hermeswebui.android.webapp.GatewayProtocol
+import org.json.JSONArray
 import org.junit.Test
 
 class HermesWebUiScriptsTest {
@@ -325,5 +327,30 @@ class HermesWebUiScriptsTest {
 
         assertThat(deliver).contains("\"image/png\\\");alert(1);//\"")
         assertThat(deliver).contains("\"A\\\"B\"")
+    }
+
+    @Test
+    fun `gateway tap is built from the parser's markers and fenced to its own document`() {
+        val script = HermesWebUiScripts.buildWebappGatewayTapScript("Hermes\"Gateway", GatewayProtocol.WATCHED_MARKERS)
+
+        assertThat(script).contains("var bridge = window[\"Hermes\\\"Gateway\"];")
+        assertThat(script).contains("var markers = ${JSONArray(GatewayProtocol.WATCHED_MARKERS)};")
+        assertThat(script).contains("if (window.__hermesAndroidGatewayTapInstalled) return;")
+        // Only same-host sockets whose path ends in /api/ws, parsed with the URL captured at install.
+        assertThat(script).contains("var NativeURL = window.URL;")
+        assertThat(script).contains("url.host === location.host && /\\/api\\/ws\\/?$/.test(url.pathname)")
+        // Native may only send on a socket of the document that announced itself, via the native send.
+        assertThat(script).contains("command.doc !== doc")
+        assertThat(script).contains("nativeSend.call(ws, command.frame)")
+    }
+
+    @Test
+    fun `gateway tap checks the webapp surface when frames arrive, not at install`() {
+        val script = HermesWebUiScripts.buildWebappGatewayTapScript("HermesAndroidGateway", GatewayProtocol.WATCHED_MARKERS)
+        val surfaceReads = Regex("""__HERMES_UI_SURFACE__""").findAll(script).count()
+
+        assertThat(surfaceReads).isEqualTo(1)
+        assertThat(script).contains("var isWebapp = function() { return window.__HERMES_UI_SURFACE__ === 'webapp'; };")
+        assertThat(script).contains("if (!isWebapp()) return;")
     }
 }

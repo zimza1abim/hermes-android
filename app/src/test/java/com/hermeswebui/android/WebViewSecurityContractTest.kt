@@ -157,6 +157,41 @@ class WebViewSecurityContractTest {
         )
     }
 
+    @Test
+    fun `the webapp keep-alive service is private and uses the dataSync type`() {
+        val service = Regex("""<service[^>]*android:name="\.background\.HermesKeepAliveService"[^>]*/>""")
+            .find(manifest)?.value
+        assertWithMessage("HermesKeepAliveService manifest entry").that(service).isNotNull()
+        assertThat(service).contains("android:exported=\"false\"")
+        assertThat(service).contains("android:foregroundServiceType=\"dataSync\"")
+        assertThat(manifest).doesNotContain("foregroundServiceType=\"specialUse\"")
+    }
+
+    @Test
+    fun `webapp tray answers stay private and Allow requires an unlocked device`() {
+        val coordinator = codeOnly.entries.single { it.key.endsWith("webapp/WebappGatewayCoordinator.kt") }.value
+        assertThat(coordinator).contains("ContextCompat.RECEIVER_NOT_EXPORTED")
+        assertThat(coordinator).doesNotContain("RECEIVER_EXPORTED,")
+        assertThat(coordinator).contains(".setPackage(activity.packageName)")
+        val allow = coordinator.substringAfter("\"Allow\"").substringBefore(".build()")
+        assertThat(allow).contains(".setAuthenticationRequired(true)")
+        assertThat(coordinator).contains("PendingIntent.FLAG_IMMUTABLE")
+        assertThat(coordinator).doesNotContain("FLAG_MUTABLE")
+    }
+
+    @Test
+    fun `webapp bridge messages are trust-checked before parsing and taps never load a url`() {
+        val coordinator = codeOnly.entries.single { it.key.endsWith("webapp/WebappGatewayCoordinator.kt") }.value
+        val handler = bodiesOf(coordinator, "private fun onBridgeMessage(").single()
+        assertThat(handler.indexOf("isTrustedSource(origin, isMainFrame)")).isAtLeast(0)
+        assertThat(handler.indexOf("isTrustedSource(origin, isMainFrame)"))
+            .isLessThan(handler.indexOf("WebappBridgeEnvelope.parse("))
+        // Loading a URL would reload the page and drop the gateway socket the app keeps alive.
+        listOf("loadUrl", "loadInMainWebView", "EXTRA_NOTIFICATION_URL").forEach { call ->
+            assertWithMessage("WebappGatewayCoordinator must not $call").that(coordinator).doesNotContain(call)
+        }
+    }
+
     private fun stripComments(text: String): String {
         val noBlock = Regex("""/\*.*?\*/""", RegexOption.DOT_MATCHES_ALL).replace(text, "")
         // Skip `://` so URLs inside string literals survive.

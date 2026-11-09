@@ -1,5 +1,6 @@
 package com.hermeswebui.android.webui
 
+import org.json.JSONArray
 import org.json.JSONObject
 
 object HermesWebUiScripts {
@@ -1652,6 +1653,128 @@ object HermesWebUiScripts {
               try {
                 window.dispatchEvent(new CustomEvent('hermes-app-foreground', { detail: { active: active } }));
               } catch (_) {}
+            })();
+        """.trimIndent()
+    }
+
+    /**
+     * Official Webapp gateway tap. Wraps `window.WebSocket` so sockets the page opens to its own
+     * origin's `/api/ws` report watched inbound frames, page responses and closes to
+     * [bridgeName]. Native parses everything (`webapp/GatewayProtocol`); this script only filters
+     * by [markers], so it holds no protocol knowledge. The page surface is checked per frame because
+     * `__HERMES_UI_SURFACE__` is set after document start. Native may ask it to send a frame only on
+     * a socket of this same document, through the captured native `send`.
+     */
+    fun buildWebappGatewayTapScript(bridgeName: String, markers: List<String>): String {
+        val quotedBridgeName = JSONObject.quote(bridgeName)
+        val markersJson = JSONArray(markers).toString()
+        return """
+            (function() {
+              if (window.__hermesAndroidGatewayTapInstalled) return;
+              var bridge = window[$quotedBridgeName];
+              var NativeWS = window.WebSocket;
+              var NativeURL = window.URL;
+              if (!bridge || typeof bridge.postMessage !== 'function' ||
+                  typeof NativeWS !== 'function' || typeof NativeURL !== 'function') return;
+              window.__hermesAndroidGatewayTapInstalled = true;
+
+              var nativeSend = NativeWS.prototype.send;
+              var markers = $markersJson;
+              var doc = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12);
+              var helloSent = false;
+              var sockets = {};
+              var nextSock = 1;
+
+              var isWebapp = function() { return window.__HERMES_UI_SURFACE__ === 'webapp'; };
+              var deliver = function(message) {
+                message.doc = doc;
+                try { bridge.postMessage(JSON.stringify(message)); } catch (_) {}
+              };
+              var hello = function() {
+                if (helloSent) return;
+                helloSent = true;
+                deliver({ t: 'hello' });
+              };
+              var post = function(message) {
+                hello();
+                deliver(message);
+              };
+              var isGatewayUrl = function(raw) {
+                try {
+                  var url = new NativeURL(String(raw), location.href);
+                  // Chromium accepts http(s) and relative WebSocket URLs and dials them as ws(s).
+                  return ['ws:', 'wss:', 'http:', 'https:'].indexOf(url.protocol) !== -1 &&
+                    url.host === location.host && /\/api\/ws\/?${'$'}/.test(url.pathname);
+                } catch (_) { return false; }
+              };
+              var watched = function(text) {
+                if (typeof text !== 'string') return false;
+                for (var i = 0; i < markers.length; i++) {
+                  if (text.indexOf(markers[i]) !== -1) return true;
+                }
+                return false;
+              };
+              var isResponse = function(data) {
+                return typeof data === 'string' && data.indexOf('"method"') === -1 &&
+                  (data.indexOf('"result"') !== -1 || data.indexOf('"error"') !== -1);
+              };
+
+              var attach = function(ws) {
+                var sock = nextSock++;
+                var announced = false;
+                sockets[sock] = ws;
+                var announce = function() {
+                  if (announced || !isWebapp()) return;
+                  announced = true;
+                  hello();
+                };
+                ws.send = function(data) {
+                  if (isWebapp() && isResponse(data)) {
+                    announce();
+                    post({ t: 'out', sock: sock, data: data });
+                  }
+                  return nativeSend.apply(ws, arguments);
+                };
+                ws.addEventListener('open', announce);
+                ws.addEventListener('message', function(event) {
+                  if (!isWebapp()) return;
+                  announce();
+                  if (watched(event.data)) post({ t: 'in', sock: sock, data: event.data });
+                });
+                ws.addEventListener('close', function() {
+                  delete sockets[sock];
+                  if (announced) post({ t: 'close', sock: sock });
+                });
+              };
+
+              var Tap = function(url, protocols) {
+                var ws = arguments.length > 1 ? new NativeWS(url, protocols) : new NativeWS(url);
+                if (isGatewayUrl(url)) attach(ws);
+                return ws;
+              };
+              Tap.prototype = NativeWS.prototype;
+              Tap.CONNECTING = 0;
+              Tap.OPEN = 1;
+              Tap.CLOSING = 2;
+              Tap.CLOSED = 3;
+              window.WebSocket = Tap;
+
+              bridge.onmessage = function(event) {
+                var command = null;
+                try { command = JSON.parse(String(event && event.data)); } catch (_) { return; }
+                if (!command || command.t !== 'send' || command.doc !== doc || typeof command.frame !== 'string') return;
+                var ws = sockets[command.sock];
+                if (!ws || ws.readyState !== 1) {
+                  post({ t: 'sendFailed', sock: command.sock, key: command.key });
+                  return;
+                }
+                try {
+                  nativeSend.call(ws, command.frame);
+                  post({ t: 'sent', sock: command.sock, key: command.key });
+                } catch (_) {
+                  post({ t: 'sendFailed', sock: command.sock, key: command.key });
+                }
+              };
             })();
         """.trimIndent()
     }

@@ -129,6 +129,8 @@ import com.hermeswebui.android.ui.MainViewModelFactory
 import com.hermeswebui.android.ui.settings.SettingsScreen
 import com.hermeswebui.android.ui.settings.VpnLaunchAppOption
 import com.hermeswebui.android.ui.web.WebShell
+import com.hermeswebui.android.webapp.WebappBackgroundSettings
+import com.hermeswebui.android.webapp.WebappGatewayCoordinator
 import com.hermeswebui.android.webui.HermesWebUiScripts
 import com.hermeswebui.android.webui.VoiceCaptureLifecycleGate
 import com.hermeswebui.android.webview.HermesMediaPlaybackPolicy
@@ -147,6 +149,7 @@ import java.io.File
 
 private const val HermesNotificationBridgeName = "HermesAndroidNotifications"
 private const val HermesClipboardBridgeName = "HermesAndroidClipboard"
+private const val HermesWebappGatewayBridgeName = "HermesAndroidGateway"
 private const val HermesNotificationChannelId = "hermes_webui_notifications"
 private const val HermesNotificationIdBase = 10_000
 private const val HermesVpnReconnectNotificationId = 9_900
@@ -224,6 +227,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var notificationBridgeCoordinator: HermesNotificationBridgeCoordinator
     private lateinit var clipboardBridgeCoordinator: HermesClipboardBridgeCoordinator
     private var clipboardBridgeScriptHandler: ScriptHandler? = null
+    private lateinit var webappGateway: WebappGatewayCoordinator
+    private var webappGatewayTapScriptHandler: ScriptHandler? = null
     private lateinit var notificationPresenter: HermesNotificationPresenter
     private lateinit var serverProfileCoordinator: HermesServerProfileCoordinator
     private lateinit var foregroundServiceCoordinator: HermesForegroundServiceCoordinator
@@ -375,6 +380,12 @@ class MainActivity : ComponentActivity() {
             isTrustedSource = ::isTrustedNotificationBridgeSource,
             runOnUiThread = { action -> runOnUiThread(action) }
         )
+        webappGateway = WebappGatewayCoordinator(
+            activity = this,
+            bridgeName = HermesWebappGatewayBridgeName,
+            isTrustedSource = ::isTrustedNotificationBridgeSource,
+            initialSettings = WebappBackgroundSettings()
+        )
         appUpdateCoordinator = HermesAppUpdateCoordinator(
             context = this,
             activityScope = lifecycleScope,
@@ -421,6 +432,7 @@ class MainActivity : ComponentActivity() {
 
         applyScreenshotSecurity(settingsRepository.isBlockScreenshotsEnabled())
         webView = buildWebView()
+        webappGateway.install(webView)
         installHermesWebUiDocumentStartFixes(webView, viewModel.uiState.value.settings.serverUrl)
 
         if (!appUpdateCoordinator.handleIntent(intent)) {
@@ -477,6 +489,9 @@ class MainActivity : ComponentActivity() {
         if (appUpdateCoordinator.handleIntent(intent)) {
             return
         }
+        if (webappGateway.handleIntent(intent)) {
+            return
+        }
         if (notificationPresenter.handleIntent(intent, ::loadInMainWebView)) {
             return
         }
@@ -489,6 +504,7 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         activityVisible = true
         voiceCaptureGate.onStart()
+        if (::webappGateway.isInitialized) webappGateway.onVisibilityChanged(visible = true)
     }
 
     override fun onResume() {
@@ -527,12 +543,14 @@ class MainActivity : ComponentActivity() {
         appUpdateCoordinator.cancelAutomaticAppUpdateCheck()
         val state = viewModel.uiState.value
         foregroundServiceCoordinator.onActivityStopped(state, activityVisible)
+        if (::webappGateway.isInitialized) webappGateway.onVisibilityChanged(visible = false)
         // Clean up any lingering OAuth popup on app stop.
         cleanupExpiredOAuthPopup()
     }
 
     override fun onDestroy() {
         if (::serverProfileCoordinator.isInitialized) serverProfileCoordinator.dispose()
+        if (::webappGateway.isInitialized) webappGateway.dispose()
         proxySignInDialog?.dismiss()
         proxyAuthNavigation.clear()
         stopVpnReconnectWaitLoop()
@@ -963,6 +981,7 @@ class MainActivity : ComponentActivity() {
                 override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                     super.onPageStarted(view, url, favicon)
                     serverTypeDocumentGeneration++
+                    webappGateway.onDocumentStarted()
                     handleMainWebViewPageStarted(url)
                 }
 
@@ -1705,6 +1724,7 @@ class MainActivity : ComponentActivity() {
             add(HermesWebUiScripts.suppressClarifyAutofocusScript)
             add(buildHermesWebUiNotificationBridgeScript())
             add(HermesWebUiScripts.buildClipboardImageScript(HermesClipboardBridgeName))
+            add(webappGateway.tapScript)
             add(buildHermesWebUiRouteRecoveryScript())
             if (EnableAppSettingsSidebarShim) add(HermesWebUiScripts.appSettingsEntryScript)
             add("window.__hermesAndroidHardwareKeyboard = ${isHardwareKeyboardAttached()};")
@@ -1781,6 +1801,11 @@ class MainActivity : ComponentActivity() {
             originRule,
             HermesWebUiScripts.buildClipboardImageScript(HermesClipboardBridgeName)
         )
+        webappGatewayTapScriptHandler = addDocumentStartScript(
+            view,
+            originRule,
+            webappGateway.tapScript
+        )
         routeRecoveryScriptHandler = addDocumentStartScript(
             view,
             originRule,
@@ -1812,6 +1837,7 @@ class MainActivity : ComponentActivity() {
         microphoneFallbackScriptHandler?.remove()
         notificationBridgeScriptHandler?.remove()
         clipboardBridgeScriptHandler?.remove()
+        webappGatewayTapScriptHandler?.remove()
         routeRecoveryScriptHandler?.remove()
         appSettingsEntryScriptHandler?.remove()
         enterKeyNewlineScriptHandler?.remove()
@@ -1821,6 +1847,7 @@ class MainActivity : ComponentActivity() {
         microphoneFallbackScriptHandler = null
         notificationBridgeScriptHandler = null
         clipboardBridgeScriptHandler = null
+        webappGatewayTapScriptHandler = null
         routeRecoveryScriptHandler = null
         appSettingsEntryScriptHandler = null
         enterKeyNewlineScriptHandler = null
