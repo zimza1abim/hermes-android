@@ -1,104 +1,248 @@
-# Hermes for Android (fork)
+<div align="center">
+
+<img src="app/src/main/res/drawable-nodpi/hermes_agent_icon.png" width="112" alt="Hermes icon">
+
+# Hermes for Android
+
+**The official Hermes Agent Webapp on your phone, connected even when it isn't on screen.**
+
+[![Android](https://img.shields.io/badge/Android-8.0%2B-3DDC84?logo=android&logoColor=white)](#-build)
+[![Kotlin](https://img.shields.io/badge/Kotlin-2.4-7F52FF?logo=kotlin&logoColor=white)](#-build)
+[![Target SDK](https://img.shields.io/badge/targetSdk-37-4285F4)](#-build)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Fork of hermes-android](https://img.shields.io/badge/fork%20of-hermes--webui%2Fhermes--android-555?logo=github)](https://github.com/hermes-webui/hermes-android)
+
+[Highlights](#-highlights) ·
+[How it works](#-how-it-works) ·
+[Notifications](#-notifications) ·
+[Gateway hook](#-gateway-hook) ·
+[Settings](#%EF%B8%8F-settings) ·
+[Limits](#-known-limits) ·
+[Build](#-build)
+
+</div>
+
+---
 
 A fork of [hermes-webui/hermes-android](https://github.com/hermes-webui/hermes-android)
-focused on the **official Hermes Agent Webapp**: a connection that holds in the
-background, instant native alerts, and answering Hermes from the notification.
+built around the **official Hermes Agent Webapp**. The upstream app already
+hosts the Webapp in a hardened WebView. This fork adds what a phone needs on
+top: a gateway connection that keeps working in the background, instant native
+alerts, and answering Hermes straight from the notification.
 
-Everything below is what this fork adds or changes. The upstream README is
-kept at the bottom, folded.
+> [!NOTE]
+> Everything above the line at the bottom describes this fork. The upstream
+> README is kept unchanged in a folded section at the end.
 
-## What this fork adds
+## ✨ Highlights
 
-### Background connection
+| | |
+|---|---|
+| 🔌 **Always connected** | A native gateway monitor keeps watching your chats while the app is hidden or swiped away. |
+| ⚡ **Instant alerts** | Finished, failed, approval and question alerts arrive as they happen, not 30 seconds late. |
+| 💬 **Answer in place** | Allow or deny a command, pick a choice or type a reply without opening the app. |
+| ✅ **Confirmed answers** | A notification answer counts only once the gateway confirms it. |
+| 🧭 **Tap to open** | Tapping an alert opens that exact chat and closes the side menu. |
+| 🖥️ **Chats from anywhere** | Chats started on another device are found and watched too. |
+| 🔁 **Nothing missed** | Events from a dropped connection are replayed when it comes back. |
+| 🎨 **Hermes branding** | App name **Hermes**, the Hermes Agent launcher icon, and matching notification icons. |
 
-- **Native gateway monitor.** While the app is hidden, it opens its own
-  WebSocket to the Hermes gateway instead of relying on the WebView. Some
-  phones (Samsung One UI) push a hidden WebView renderer to the lowest
-  priority, which delayed alerts by about 30 seconds and dropped the page's
-  socket. The monitor signs in with the page's cookie and attaches to chats
-  as a viewer.
-- **Survives closing the app.** The monitor lives in the foreground service,
-  not the activity. Swiping Hermes away from Recents keeps alerts coming, and
-  the service restores the monitor if Android restarts it.
-- **Finds chats started elsewhere.** Every 10 seconds it reads the gateway's
-  live session list, so a chat started on the Mac is watched even if the
-  phone never opened it.
-- **Recovers what it missed.** After a dropped connection it replays the
-  missed events (`session.events.since`), so a turn that finished during the
-  gap still alerts. Events you already saw in the app are never replayed.
-- **Reconnects on its own.** Retries back off from 1 to 30 seconds, a network
-  change redials at once, and a socket that stops answering is closed and
-  redialed.
-- **No daily limit.** The keep-alive is a `specialUse` foreground service, and
-  Settings shows and requests the battery optimization exemption.
-- **Sturdier WebView.** The renderer is kept at important priority, and a
-  renderer crash replaces the WebView instead of crashing the app.
+## 🧠 How it works
 
-### Notifications
+The Webapp page is a great foreground client but a poor background one. Some
+phones, Samsung One UI among them, push a hidden WebView renderer to the lowest
+priority. Its socket then misses the gateway's pings, alerts arrive late, and
+the page reconnects when you return.
 
-- Alerts when a turn finishes, fails or is stopped, when a background task
-  finishes, when Hermes asks a question, and when it asks to run a command.
-- Titled with the chat's title, grouped per chat, and never duplicated between
-  the page and the monitor.
-- **Answer from the notification.** Approvals get **Allow** (unlocked phone
-  required) and **Deny**. A question with one to three choices gets a button
-  per choice, and any other single question gets a **Reply** box.
-- **Confirmed answers.** A notification answer counts only when the gateway
-  confirms it (see [Gateway hook](#gateway-hook)). An unconfirmed answer is
-  shown as such, and its buttons are hidden so it is not sent twice.
-- **Tapping opens that chat** and closes the menu if it was open. Opening the
-  app clears its Hermes alerts.
-- Per-kind on/off, message previews and sound settings in
-  **Application Settings > Notifications**.
-- Hermes outline icon in the status bar, color Hermes icon in the alert.
+So while Hermes is hidden, the app opens **its own** WebSocket to the gateway,
+independent of the WebView:
 
-### Other changes
+```mermaid
+flowchart LR
+    subgraph Phone
+        direction TB
+        Page["Webapp page<br/>(WebView)"]
+        Service["Keep-alive service<br/>(foreground, specialUse)"]
+        Monitor["Gateway monitor<br/>(OkHttp WebSocket)"]
+        Tray["Notification tray"]
+        Service --- Monitor
+        Monitor -- alerts --> Tray
+        Tray -- "Allow / Deny / Reply" --> Monitor
+    end
+    Gateway[("Hermes gateway<br/>/api/ws")]
+    Page <-- "on screen" --> Gateway
+    Monitor <-- "in background" --> Gateway
+```
 
-- The app is named **Hermes** and defaults to the Hermes Agent launcher icon.
-- The debug log capture feature is removed.
+<details>
+<summary><strong>The monitor, step by step</strong></summary>
 
-## Gateway hook
+1. **Sign in.** The monitor mints a one-use socket ticket with the page's own
+   sign-in cookie (`POST /api/webapp/socket-ticket`).
+2. **Connect.** It dials `/api/ws` with the ticket, waits for `gateway.ready`
+   and declares that it answers server requests (`client.capabilities`).
+3. **Attach.** It attaches to each chat it watches as a viewer
+   (`session.resume`). A viewer receives the chat's events and open prompts
+   without taking the chat over from other devices.
+4. **Discover.** Every 10 seconds it reads the gateway's live sessions
+   (`session.active_list`) and attaches to any running chat it doesn't watch yet.
+5. **Replay.** After a reconnect it asks for the events it missed
+   (`session.events.since`), so a turn that finished during the gap still alerts.
+6. **Hand back.** When you open the app, the monitor closes and the page takes
+   over. Replay cursors are cleared, so events you already saw never replay.
 
-`gateway-patches/hermes-android-ack/` is a gateway startup hook. It:
+</details>
 
-- sends the app a receipt when the gateway settles an answer from the
-  notification;
-- keeps the monitor's viewer attachments from bumping a chat's last-active
-  time, so chat order on other devices does not change.
+<details>
+<summary><strong>Staying alive</strong></summary>
 
-Install it on the machine that runs the gateway, then restart the gateway:
+- **The monitor lives in the service**, not in the activity. Swiping Hermes
+  away from Recents keeps alerts coming, and the service restores the monitor
+  if Android restarts it.
+- **`specialUse` foreground service**, so there is no daily runtime cap.
+- **Reconnects on its own.** Retries back off from 1 to 30 seconds, and a change
+  of default network redials at once. A socket whose `gateway.ready` or
+  `session.resume` answer is 30 seconds late is closed and redialed.
+- **Sturdier WebView.** The renderer is kept at important priority, and if it
+  crashes, the WebView is replaced instead of the app crashing.
+
+</details>
+
+<details>
+<summary><strong>No duplicates</strong></summary>
+
+While both the page and the monitor are connected, the same event can arrive
+twice. Prompts are keyed by the gateway's request id, and one-shot alerts by the
+gateway's per-session sequence number. Whichever socket delivers first posts
+the alert, and the other copy is dropped. The Webapp's own browser
+notifications are held back so they never duplicate a native one.
+
+</details>
+
+## 🔔 Notifications
+
+| Alert | When | Actions |
+|---|---|---|
+| **Finished** | A reply finished | Tap to open the chat |
+| **Failed / Stopped** | A reply ended with an error or was interrupted | Tap to open the chat |
+| **Background task done** | A background task finished | Tap to open the chat |
+| **Approval needed** | Hermes asks before running a command | **Allow** (unlocked phone) · **Deny** |
+| **Question** | Hermes needs an answer | One to three choices get a button each, any other single question gets **Reply** |
+
+- 📝 **Titled with the chat's name**, with the reason as the subtitle.
+- 🗂️ **Grouped per chat**, with a summary once a chat has two alerts.
+- 🔒 **Private on the lock screen.** It shows only "Hermes" and the reason.
+- 🧹 **Clean tray.** Opening the app clears its Hermes alerts.
+- 🧭 **Tap opens that chat.** The side menu closes first if it was open.
+
+> [!IMPORTANT]
+> A notification answer is shown as sent only after the gateway confirms it.
+> If no receipt arrives, the alert says the answer **may have been sent** and
+> hides its buttons, so it can't be sent twice. If there is no connection to
+> send on, it says so and the buttons stay. Receipts need the
+> [gateway hook](#-gateway-hook).
+
+## 🧩 Gateway hook
+
+[`gateway-patches/hermes-android-ack/`](gateway-patches/hermes-android-ack/) is
+a small startup hook for the machine that runs the Hermes gateway.
+
+| What it does | Why |
+|---|---|
+| Sends a receipt when the gateway settles an answer from a notification | So the app knows the answer landed |
+| Stops the monitor's viewer attach from bumping a chat's last-active time | So chat order on your other devices doesn't change |
+
+**Install** it, then restart the gateway:
 
 ```sh
 mkdir -p ~/.hermes/hooks/hermes-android-ack
 cp gateway-patches/hermes-android-ack/{HOOK.yaml,handler.py} ~/.hermes/hooks/hermes-android-ack/
 ```
 
-Without the hook, alerts still arrive, but every notification answer shows as
-unconfirmed after 30 seconds. The hook relies on gateway internals, so check it
-after a Hermes update. If the last-active patch no longer matches, the hook
-falls back to a normal attach and the app posts one "Gateway compatibility"
-notice.
+The gateway log then shows `Loaded hook 'hermes-android-ack'`.
 
-## Known limits
+> [!WARNING]
+> The hook relies on gateway internals, so check it after every Hermes update.
+> It fails safe:
+> - **Without the hook**, alerts still arrive, but every notification answer
+>   shows as unconfirmed after 30 seconds.
+> - **If the last-active patch no longer matches** the gateway code, the hook
+>   falls back to a normal attach. The app then posts one
+>   **Gateway compatibility** notice, and chat order may change until the hook
+>   is updated.
 
-- After a reboot, alerts start once the app has been opened.
-- A turn that starts and finishes within the 10-second list interval, in a chat
-  the phone was not watching, can be missed.
-- Chats in another profile (bots) are not watched.
-- A prompt answered on another device stays in the tray until the app is
-  opened, because the gateway sends no event for it.
-- A message you send from another device appears on the phone only after the
-  turn is saved.
+## ⚙️ Settings
 
-## Build
+Everything is under **Application Settings › Notifications**:
+
+| Setting | Effect |
+|---|---|
+| **Stay connected in the background** | Runs the keep-alive service and the gateway monitor |
+| **Message previews** | Show or hide reply text and commands in alerts. With previews off, questions get no answer buttons |
+| **Per-alert switches** | Turn each kind on or off |
+| **Sound and vibration** | Opens Android's channel settings for each kind |
+| **Unrestricted battery use** | Shows the battery optimization state and requests the exemption |
+
+> [!TIP]
+> On Samsung and some other phones, allow **Unrestricted battery use**. Otherwise
+> they may close the app in the background even with the ongoing notification.
+
+## 🚧 Known limits
+
+| Limit | Why |
+|---|---|
+| After a reboot, alerts start once the app has been opened | Nothing starts the service at boot |
+| A very short turn can be missed | A turn that starts and ends within the 10-second list interval, in a chat that wasn't watched, is never seen |
+| Bot chats in another profile aren't watched | The monitor connects for the gateway's launch profile only |
+| A prompt answered on another device stays in the tray | The gateway sends no event for that. Opening the app clears it |
+| Your own message sent from another device appears late | The gateway doesn't relay user messages to other clients. It shows up once the turn is saved |
+
+## 🛠 Build
+
+Requires the Android SDK and Gradle. The app targets Android 8.0 (API 26) up to
+API 37.
 
 ```sh
 gradle testDebugUnitTest assembleRelease
 ```
 
-Signing reads an untracked `keystore.properties` at the repo root
-(`storeFile`, `storePassword`, `keyAlias`, `keyPassword`). The APK lands in
-`app/build/outputs/apk/release/`.
+Release signing reads an untracked `keystore.properties` at the repo root:
+
+```properties
+storeFile=/path/to/release.jks
+storePassword=…
+keyAlias=…
+keyPassword=…
+```
+
+The APK lands in `app/build/outputs/apk/release/`. Install it over an existing
+build with `adb install -r` to keep your sign-in.
+
+<details>
+<summary><strong>Where things live</strong></summary>
+
+| Path | Role |
+|---|---|
+| `webapp/GatewayProtocol.kt` | Parses gateway frames and encodes requests |
+| `webapp/WebappAlerts.kt` | The reducer: every alert, prompt and answer decision |
+| `webapp/GatewayMonitor.kt` | The monitor's connection state machine |
+| `webapp/GatewayMonitorLink.kt` | Sockets, tickets, timers and replay, with OkHttp |
+| `webapp/WebappGatewayCoordinator.kt` | Renders the reducer's effects: notifications, service, WebView |
+| `webapp/AlertGroups.kt` | Per-chat grouping and summaries |
+| `background/HermesKeepAliveService.kt` | The foreground service that keeps the process alive |
+| `webui/HermesWebUiScripts.kt` | Scripts injected into the Webapp page |
+| `gateway-patches/hermes-android-ack/` | The gateway hook |
+
+Paths under `webapp/`, `background/` and `webui/` are in
+`app/src/main/java/com/hermeswebui/android/`.
+
+</details>
+
+## 📜 Credits
+
+Built on [hermes-webui/hermes-android](https://github.com/hermes-webui/hermes-android)
+(MIT). The Hermes Agent and its Webapp are by
+[Nous Research](https://github.com/NousResearch/hermes-agent).
 
 ---
 
