@@ -1,3 +1,110 @@
+# Hermes for Android (fork)
+
+A fork of [hermes-webui/hermes-android](https://github.com/hermes-webui/hermes-android)
+focused on the **official Hermes Agent Webapp**: a connection that holds in the
+background, instant native alerts, and answering Hermes from the notification.
+
+Everything below is what this fork adds or changes. The upstream README is
+kept at the bottom, folded.
+
+## What this fork adds
+
+### Background connection
+
+- **Native gateway monitor.** While the app is hidden, it opens its own
+  WebSocket to the Hermes gateway instead of relying on the WebView. Some
+  phones (Samsung One UI) push a hidden WebView renderer to the lowest
+  priority, which delayed alerts by about 30 seconds and dropped the page's
+  socket. The monitor signs in with the page's cookie and attaches to chats
+  as a viewer.
+- **Survives closing the app.** The monitor lives in the foreground service,
+  not the activity. Swiping Hermes away from Recents keeps alerts coming, and
+  the service restores the monitor if Android restarts it.
+- **Finds chats started elsewhere.** Every 10 seconds it reads the gateway's
+  live session list, so a chat started on the Mac is watched even if the
+  phone never opened it.
+- **Recovers what it missed.** After a dropped connection it replays the
+  missed events (`session.events.since`), so a turn that finished during the
+  gap still alerts. Events you already saw in the app are never replayed.
+- **Reconnects on its own.** Retries back off from 1 to 30 seconds, a network
+  change redials at once, and a socket that stops answering is closed and
+  redialed.
+- **No daily limit.** The keep-alive is a `specialUse` foreground service, and
+  Settings shows and requests the battery optimization exemption.
+- **Sturdier WebView.** The renderer is kept at important priority, and a
+  renderer crash replaces the WebView instead of crashing the app.
+
+### Notifications
+
+- Alerts when a turn finishes, fails or is stopped, when a background task
+  finishes, when Hermes asks a question, and when it asks to run a command.
+- Titled with the chat's title, grouped per chat, and never duplicated between
+  the page and the monitor.
+- **Answer from the notification.** Approvals get **Allow** (unlocked phone
+  required) and **Deny**. A question with one to three choices gets a button
+  per choice, and any other single question gets a **Reply** box.
+- **Confirmed answers.** A notification answer counts only when the gateway
+  confirms it (see [Gateway hook](#gateway-hook)). An unconfirmed answer is
+  shown as such, and its buttons are hidden so it is not sent twice.
+- **Tapping opens that chat** and closes the menu if it was open. Opening the
+  app clears its Hermes alerts.
+- Per-kind on/off, message previews and sound settings in
+  **Application Settings > Notifications**.
+- Hermes outline icon in the status bar, color Hermes icon in the alert.
+
+### Other changes
+
+- The app is named **Hermes** and defaults to the Hermes Agent launcher icon.
+- The debug log capture feature is removed.
+
+## Gateway hook
+
+`gateway-patches/hermes-android-ack/` is a gateway startup hook. It:
+
+- sends the app a receipt when the gateway settles an answer from the
+  notification;
+- keeps the monitor's viewer attachments from bumping a chat's last-active
+  time, so chat order on other devices does not change.
+
+Install it on the machine that runs the gateway, then restart the gateway:
+
+```sh
+mkdir -p ~/.hermes/hooks/hermes-android-ack
+cp gateway-patches/hermes-android-ack/{HOOK.yaml,handler.py} ~/.hermes/hooks/hermes-android-ack/
+```
+
+Without the hook, alerts still arrive, but every notification answer shows as
+unconfirmed after 30 seconds. The hook relies on gateway internals, so check it
+after a Hermes update. If the last-active patch no longer matches, the hook
+falls back to a normal attach and the app posts one "Gateway compatibility"
+notice.
+
+## Known limits
+
+- After a reboot, alerts start once the app has been opened.
+- A turn that starts and finishes within the 10-second list interval, in a chat
+  the phone was not watching, can be missed.
+- Chats in another profile (bots) are not watched.
+- A prompt answered on another device stays in the tray until the app is
+  opened, because the gateway sends no event for it.
+- A message you send from another device appears on the phone only after the
+  turn is saved.
+
+## Build
+
+```sh
+gradle testDebugUnitTest assembleRelease
+```
+
+Signing reads an untracked `keystore.properties` at the repo root (see
+`keystore.properties.example`). The APK lands in
+`app/build/outputs/apk/release/`.
+
+---
+
+<details>
+<summary><strong>Upstream README (hermes-webui/hermes-android)</strong></summary>
+
 # Hermes-Android
 
 Hermes-Android brings the Hermes workspace to Android without turning it
@@ -82,42 +189,14 @@ editors, mobile keyboard behavior, tabs, responsive layout, and voice UI;
 Android does not emulate Electron or inject WebUI's sidebar/editor repairs.
 WebUI-specific session deep links, background SSE monitoring and approval
 actions are not an adapter for the official Webapp's gateway WebSocket
-protocol. Blob/data-URL exports are not yet supported natively.
-
-### Official Webapp in the background
-
-While the official Webapp is open, switching to another app no longer drops
-its connection: Android keeps the page running behind a quiet ongoing
-notification, so progress is already there when you return. While Hermes is
-in the background you also get native alerts when a task finishes, fails or
-is stopped, when a background task finishes, when Hermes has a question, and
-when it asks to run a command. An approval alert offers **Allow** (the phone
-must be unlocked) and **Deny**, answered over the page's own connection.
-A question with one to three choices gets a button per choice, and any other
-single question gets a **Reply** box; both need an unlocked phone and are
-answered the same way. A question set with several questions opens the app
-when tapped. With previews hidden, question alerts have no answer buttons.
-Alerts from the same session are grouped, with a summary once there are two.
-Tapping an alert brings Hermes back without reloading the page and opens
-that alert's session when the page has its own notification for it. Alerts for
-open prompts disappear when you return, because the page shows them itself.
-
-Change this in **Application Settings > Notifications**: stay connected in
-the background, show or hide message previews (the lock screen always hides
-them), turn each kind of alert on or off, and open Android's sound and
-vibration settings for each kind. **Unrestricted battery use** shows whether
-Android exempts Hermes from battery optimization and opens the system prompt
-when it does not; Samsung and some other phones close optimized apps in the
-background even while they show the ongoing notification. The connection has no daily time limit:
-it stays up until you close the page, turn the setting off or Android stops
-the app. Hermes WebUI keeps its own background options.
+protocol. Blob/data-URL exports and notification clicks that require a
+page-local JavaScript callback are not yet supported natively.
 
 ### Launcher icon and server labels
 
-The app is named **Hermes** and new installs show the official Hermes Agent
-artwork. In **Application Settings > Appearance > Launcher icon**, near the
-bottom above About, choose the Hermes WebUI artwork or the official Hermes
-Agent artwork; an earlier choice is kept on update. This changes only
+In **Application Settings > Appearance > Launcher icon**, near the bottom
+above About, choose the existing
+Hermes WebUI artwork or the official Hermes Agent artwork. This changes only
 the Android launcher entry, independently of the current server. Launchers may
 take a moment to refresh; a previously pinned home-screen shortcut may need
 to be pinned again.
@@ -467,7 +546,7 @@ Core runtime areas:
 - `data/` - encrypted settings persistence and local state
 - `domain/` - validation and share-intent parsing
 - `notification/` - Hermes notification bridge and Android notification presentation
-- `background/` - reconnect and foreground-service coordination
+- `background/` - reconnect, debug logging, and foreground-service coordination
 - `server/` - startup preflight and server profile validation/switching
 - `update/` - Play and GitHub update checks and update UX
 - `ui/` - Compose screens and ViewModel state
@@ -494,3 +573,5 @@ remain under human ownership. AI output is reviewed as proposed engineering
 work, not treated as authoritative by default.
 
 See [AI_USE.md](./AI_USE.md) for the full policy and workflow.
+
+</details>
