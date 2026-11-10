@@ -546,7 +546,9 @@ object WebappAlertReducer {
         val sessionId = state.focus ?: return state to emptyList()
         if (!state.visible) return state to emptyList()
         val cleared = state.copy(focus = null)
-        return cleared to listOfNotNull(WebappEffect.FocusSession(sessionId).takeIf { state.doc != null })
+        // The page opens chats by stored id and may not know a runtime id the monitor attached.
+        val target = state.sessions[sessionId]?.storedId ?: sessionId
+        return cleared to listOfNotNull(WebappEffect.FocusSession(target).takeIf { state.doc != null })
     }
 
     private fun keepAliveChange(before: WebappState, after: WebappState): List<WebappEffect> {

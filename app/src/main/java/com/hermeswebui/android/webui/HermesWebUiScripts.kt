@@ -1447,6 +1447,12 @@ object HermesWebUiScripts {
               // A native gateway alert tap names a session; run the newest kept notification's own
               // click for it, which opens that session in place.
               window.__hermesAndroidFocusSession = function(sessionId) {
+                // The Webapp closes its narrow-screen menu only when a chat is picked inside it.
+                try {
+                  window.dispatchEvent(new CustomEvent('hermes:pane-toggle-reveal', {
+                    detail: { id: 'chat-sidebar', mode: 'close' }
+                  }));
+                } catch (_) {}
                 var tags = Object.keys(pageNotifications);
                 for (var i = tags.length - 1; i >= 0; i--) {
                   var kindEnd = tags[i].indexOf(':', 'hermes:'.length);
@@ -1457,7 +1463,21 @@ object HermesWebUiScripts {
                   }
                   return true;
                 }
-                return false;
+                // No kept notification for this session (the alert came from the native monitor):
+                // have the page mint one through its own notify, then run that one's click.
+                var desktop = window.hermesDesktop;
+                if (!desktop || typeof desktop.notify !== 'function') return false;
+                var focusTag = 'hermes:android-focus:' + String(sessionId);
+                try {
+                  desktop.notify({ kind: 'android-focus', focusSessionId: String(sessionId), title: document.title });
+                } catch (_) { return false; }
+                var minted = pageNotifications[focusTag];
+                if (!minted) return false;
+                delete pageNotifications[focusTag];
+                if (typeof minted.onclick === 'function') {
+                  try { minted.onclick(safeEvent('click')); } catch (_) {}
+                }
+                return true;
               };
 
               HermesAndroidNotification.prototype.close = function() {
