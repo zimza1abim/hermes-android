@@ -6,6 +6,8 @@
     <string name="webapp_alert_approval">승인 필요</string>
     <string name="webapp_alert_question">질문</string>
     <string name="webapp_alert_background">백그라운드 작업 완료</string>
+    <string name="webapp_signin_needed_title">백그라운드 알림 중지됨</string>
+    <string name="webapp_signin_needed_body">Hermes 게이트웨이가 로그인을 더 이상 받지 않아요. Hermes를 열고 다시 로그인하면 알림이 다시 와요.</string>
     <plurals name="webapp_alert_summary_count">
         <item quantity="other">업데이트 %d개</item>
     </plurals>

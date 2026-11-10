@@ -29,12 +29,17 @@ sealed interface MonitorPhase {
     ) : MonitorPhase
 
     data class Backoff(val attempt: Int) : MonitorPhase
+
+    /** The gateway refused the page's sign-in [MAX_AUTH_FAILURES] times in a row; waits for the app to be shown. */
+    data object SignedOut : MonitorPhase
 }
 
 data class MonitorState(
     val gen: Int = 0,
     val phase: MonitorPhase = MonitorPhase.Idle,
     val nextRequestId: Int = 1,
+    /** Ticket refusals (401/403) since the last minted ticket. */
+    val authFailures: Int = 0,
 ) {
     val live: MonitorPhase.Live? get() = phase as? MonitorPhase.Live
 
@@ -46,6 +51,7 @@ data class MonitorState(
 object GatewayMonitorMachine {
     private const val BASE_DELAY_MS = 1_000L
     private const val MAX_DELAY_MS = 30_000L
+    const val MAX_AUTH_FAILURES = 3
 
     fun retryDelayMs(attempt: Int): Long = (BASE_DELAY_MS shl attempt.coerceIn(0, 5)).coerceAtMost(MAX_DELAY_MS)
 
@@ -53,9 +59,12 @@ object GatewayMonitorMachine {
     fun reconcile(state: MonitorState, want: Boolean, watch: List<String>,
                   allowRotation: Boolean = true): Pair<MonitorState, List<WebappEffect>> {
         if (!want) {
-            return if (state.phase == MonitorPhase.Idle) state to emptyList()
-            else state.copy(gen = state.gen + 1, phase = MonitorPhase.Idle) to listOf(WebappEffect.MonitorClose(state.gen))
+            // Showing the app may refresh the sign-in, so the next background run starts afresh.
+            return if (state.phase == MonitorPhase.Idle) state.copy(authFailures = 0) to emptyList()
+            else state.copy(gen = state.gen + 1, phase = MonitorPhase.Idle, authFailures = 0) to
+                listOf(WebappEffect.MonitorClose(state.gen))
         }
+        if (state.phase == MonitorPhase.SignedOut) return state to emptyList()
         if (state.phase == MonitorPhase.Idle) return mint(state, attempt = 0)
         val live = state.live ?: return state to emptyList()
         // A shared socket cannot safely detach a single legacy viewer. Reconnect it when the
@@ -79,7 +88,11 @@ object GatewayMonitorMachine {
         val phase = state.phase
         return when (input) {
             is WebappInput.TicketMinted -> if (phase !is MonitorPhase.Minting) state to emptyList()
-                else input.ticket?.let { state.copy(phase = MonitorPhase.Connecting(phase.attempt)) to listOf(WebappEffect.MonitorDial(state.gen, it)) }
+                else if (input.signedOut) signedOut(state, phase.attempt)
+                else input.ticket?.let {
+                    state.copy(phase = MonitorPhase.Connecting(phase.attempt), authFailures = 0) to
+                        listOf(WebappEffect.MonitorDial(state.gen, it))
+                }
                     ?: backoff(state, phase.attempt)
             is WebappInput.MonitorOpened -> if (phase !is MonitorPhase.Connecting) state to emptyList()
                 else state.copy(phase = MonitorPhase.Attaching(phase.attempt)) to emptyList()
@@ -96,7 +109,7 @@ object GatewayMonitorMachine {
 
     /** A new default network: dial again now, on it, instead of waiting out a backoff or a dead socket's timeout. */
     fun networkChanged(state: MonitorState): Pair<MonitorState, List<WebappEffect>> = when (val phase = state.phase) {
-        MonitorPhase.Idle -> state to emptyList()
+        MonitorPhase.Idle, MonitorPhase.SignedOut -> state to emptyList()
         is MonitorPhase.Backoff -> mint(state, phase.attempt)
         else -> mint(state, attempt = 0).let { (next, effects) -> next to listOf(WebappEffect.MonitorClose(state.gen)) + effects }
     }
@@ -132,6 +145,13 @@ object GatewayMonitorMachine {
     private fun mint(state: MonitorState, attempt: Int): Pair<MonitorState, List<WebappEffect>> {
         val gen = state.gen + 1
         return state.copy(gen = gen, phase = MonitorPhase.Minting(attempt)) to listOf(WebappEffect.MonitorMint(gen))
+    }
+
+    /** A refused sign-in: retried like any failure, until it has been refused [MAX_AUTH_FAILURES] times in a row. */
+    private fun signedOut(state: MonitorState, attempt: Int): Pair<MonitorState, List<WebappEffect>> {
+        val failures = state.authFailures + 1
+        if (failures < MAX_AUTH_FAILURES) return backoff(state.copy(authFailures = failures), attempt)
+        return state.copy(phase = MonitorPhase.SignedOut, authFailures = failures) to listOf(WebappEffect.SignInNeeded)
     }
 
     private fun backoff(state: MonitorState, attempt: Int): Pair<MonitorState, List<WebappEffect>> =

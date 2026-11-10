@@ -268,7 +268,10 @@ class WebappGatewayCoordinator private constructor(
                     dispatch(WebappInput.SendResult(effect.rpcId, false))
                 }
             }
-            WebappEffect.QuietWatchFallback -> notifyQuietWatchFallback()
+            WebappEffect.QuietWatchFallback ->
+                notifyWarning(R.string.webapp_quiet_fallback_title, R.string.webapp_quiet_fallback_body, QUIET_WARNING_ID)
+            WebappEffect.SignInNeeded ->
+                notifyWarning(R.string.webapp_signin_needed_title, R.string.webapp_signin_needed_body, SIGNIN_WARNING_ID)
             is WebappEffect.KeepAlive -> keepAlive(effect.on)
             is WebappEffect.MonitorMint -> {
                 val url = serverUrl()
@@ -401,18 +404,19 @@ class WebappGatewayCoordinator private constructor(
     }
 
     @SuppressLint("MissingPermission")
-    private fun notifyQuietWatchFallback() {
+    private fun notifyWarning(titleRes: Int, bodyRes: Int, id: Int) {
         if (!HermesKeepAliveService.canPostNotifications(context) || state.visible) return
+        val body = context.getString(bodyRes)
         val notification = NotificationCompat.Builder(context, QUIET_WARNING_CHANNEL)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(context.getString(R.string.webapp_quiet_fallback_title))
-            .setContentText(context.getString(R.string.webapp_quiet_fallback_body))
-            .setStyle(NotificationCompat.BigTextStyle().bigText(context.getString(R.string.webapp_quiet_fallback_body)))
+            .setContentTitle(context.getString(titleRes))
+            .setContentText(body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setContentIntent(HermesKeepAliveService.openAppIntent(context))
             .setAutoCancel(true)
             .setOnlyAlertOnce(true)
             .build()
-        runCatching { NotificationManagerCompat.from(context).notify(QUIET_WARNING_TAG, QUIET_WARNING_ID, notification) }
+        runCatching { NotificationManagerCompat.from(context).notify(QUIET_WARNING_TAG, id, notification) }
     }
 
     @SuppressLint("MissingPermission")
@@ -605,6 +609,7 @@ class WebappGatewayCoordinator private constructor(
         private const val QUIET_WARNING_TAG = "hermes.webapp.quiet_fallback"
         private const val QUIET_WARNING_CHANNEL = "hermes_webapp_compatibility"
         private const val QUIET_WARNING_ID = 20_022
+        private const val SIGNIN_WARNING_ID = 20_023
 
         private fun StatusBarNotification.toShownAlert(): ShownAlert? {
             val group = notification.group ?: return null

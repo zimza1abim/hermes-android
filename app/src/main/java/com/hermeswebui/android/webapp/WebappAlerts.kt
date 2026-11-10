@@ -202,8 +202,8 @@ sealed interface WebappInput {
         val gen: Int
     }
 
-    /** Null when the ticket could not be minted. */
-    data class TicketMinted(override val gen: Int, val ticket: String?) : MonitorInput {
+    /** Null when the ticket could not be minted; [signedOut] when the gateway refused the sign-in (401/403). */
+    data class TicketMinted(override val gen: Int, val ticket: String?, val signedOut: Boolean = false) : MonitorInput {
         override fun toString() = "TicketMinted(gen=$gen, ticket=${if (ticket == null) "null" else "…"})"
     }
     data class MonitorOpened(override val gen: Int) : MonitorInput
@@ -222,6 +222,8 @@ sealed interface WebappEffect {
     /** Ask the live document to open a session; emitted only while visible. */
     data class FocusSession(val sessionId: String) : WebappEffect
     data object QuietWatchFallback : WebappEffect
+    /** The background monitor stopped because the gateway keeps refusing the sign-in. */
+    data object SignInNeeded : WebappEffect
     data class MonitorMint(val gen: Int) : WebappEffect
     data class MonitorDial(val gen: Int, val ticket: String) : WebappEffect {
         override fun toString() = "MonitorDial(gen=$gen)"
@@ -386,8 +388,14 @@ object WebappAlertReducer {
         val stale = learned.prompts.filterValues {
             it.request.sessionId == snapshot.runtimeId && it.routes == setOf(PromptRoute.Monitor) && it.request.rpcId !in open
         }
+        // The gateway drops a request the moment an answer settles it, so one still open here never got an
+        // unconfirmed tray answer: offer the buttons again.
         val next = snapshot.openRequests.fold(learned.copy(prompts = learned.prompts - stale.keys)) { acc, request ->
-            acc.open(request, PromptRoute.Monitor)
+            acc.open(request, PromptRoute.Monitor).let { opened ->
+                val prompt = opened.prompts[request.rpcId]
+                if (prompt == null || !prompt.answerUncertain || prompt.sending) opened
+                else opened.copy(prompts = opened.prompts + (request.rpcId to prompt.copy(answerUncertain = false, answerFailed = false)))
+            }
         }
         return next to effects
     }

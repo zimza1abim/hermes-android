@@ -186,6 +186,34 @@ class GatewayMonitorTest {
     }
 
     @Test
+    fun `a sign-in refused three times in a row stops the monitor until the app is shown`() {
+        val hidden = arrayOf(Hello(doc), Inbound(doc, 1, runningInfo), Visibility(false))
+        val refusedTwice = arrayOf(*hidden, TicketMinted(1, null, signedOut = true), RetryDue(1),
+            TicketMinted(2, null, signedOut = true), RetryDue(2))
+        assertThat(last(*refusedTwice)).contains(MonitorMint(3))
+        val stopped = arrayOf(*refusedTwice, TicketMinted(3, null, signedOut = true))
+        assertThat(last(*stopped)).containsExactly(WebappEffect.SignInNeeded)
+        assertThat(stateAfter(*stopped).monitor.phase).isEqualTo(MonitorPhase.SignedOut)
+        assertThat(last(*stopped, NetworkChanged)).isEmpty()
+        assertThat(last(*stopped, Visibility(true), Visibility(false)).filterIsInstance<MonitorMint>()).isNotEmpty()
+        val recovered = arrayOf(*hidden, TicketMinted(1, null, signedOut = true), RetryDue(1), TicketMinted(2, "t"))
+        assertThat(stateAfter(*recovered).monitor.authFailures).isEqualTo(0)
+    }
+
+    @Test
+    fun `an unconfirmed answer becomes answerable again when the reconnect shows the request still open`() {
+        val fromMonitor = MonitorReceived(1, MonitorFrame.Inbound(approval))
+        val allow = TrayAnswer(AnswerTarget(approvalId), TrayReply.Decide(Decision.ALLOW))
+        val unconfirmed = arrayOf(*live, fromMonitor, allow, MonitorReceived(1, MonitorFrame.AnswerAck(approvalId, false)))
+        assertThat(stateAfter(*unconfirmed).prompts[approvalId]?.answerUncertain).isTrue()
+        val reconnected = arrayOf(*unconfirmed, MonitorClosed(1), RetryDue(1), TicketMinted(2, "t2"), MonitorOpened(2),
+            MonitorReceived(2, MonitorFrame.Ready), MonitorReceived(2, MonitorFrame.Resumed(5, snapshot(approval))))
+        val state = stateAfter(*reconnected)
+        assertThat(state.prompts[approvalId]?.answerUncertain).isFalse()
+        assertThat(WebappAlertReducer.promptAlerts(state).values.single().actions).isNotNull()
+    }
+
+    @Test
     fun `acknowledgement controls whether a submitted prompt is removed`() {
         val fromMonitor = MonitorReceived(1, MonitorFrame.Inbound(approval))
         val allow = TrayAnswer(AnswerTarget(approvalId), TrayReply.Decide(Decision.ALLOW))

@@ -115,6 +115,10 @@ internal class GatewayMonitorLink(
                 override fun onFailure(call: Call, e: IOException) = post(WebappInput.TicketMinted(gen, null))
 
                 override fun onResponse(call: Call, response: Response) {
+                    if (response.code == 401 || response.code == 403) {
+                        response.close()
+                        return post(WebappInput.TicketMinted(gen, null, signedOut = true))
+                    }
                     val ticket = response.use { reply ->
                         if (!reply.isSuccessful) null else runCatching {
                             (JSONTokener(reply.body?.string().orEmpty()).nextValue() as? JSONObject)

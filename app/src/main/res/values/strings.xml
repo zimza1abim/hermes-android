@@ -94,6 +94,8 @@
         <item quantity="one">%d update</item>
         <item quantity="other">%d updates</item>
     </plurals>
+    <string name="webapp_signin_needed_title">Background alerts paused</string>
+    <string name="webapp_signin_needed_body">The Hermes gateway no longer accepts this sign-in. Open Hermes and sign in again to resume alerts.</string>
     <string name="webapp_quiet_fallback_title">Hermes gateway compatibility</string>
     <string name="webapp_quiet_fallback_body">Hermes is using the ordinary connection. Chat order may change until gateway compatibility is restored.</string>
 </resources>
