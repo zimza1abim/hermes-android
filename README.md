@@ -96,8 +96,8 @@ notice.
 gradle testDebugUnitTest assembleRelease
 ```
 
-Signing reads an untracked `keystore.properties` at the repo root (see
-`keystore.properties.example`). The APK lands in
+Signing reads an untracked `keystore.properties` at the repo root
+(`storeFile`, `storePassword`, `keyAlias`, `keyPassword`). The APK lands in
 `app/build/outputs/apk/release/`.
 
 ---
