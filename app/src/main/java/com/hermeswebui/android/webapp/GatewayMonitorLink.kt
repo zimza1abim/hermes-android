@@ -1,6 +1,7 @@
 package com.hermeswebui.android.webapp
 
 import android.os.Handler
+import android.webkit.CookieManager
 import android.content.Context
 import java.security.MessageDigest
 import java.io.IOException
@@ -115,6 +116,7 @@ internal class GatewayMonitorLink(
                 override fun onFailure(call: Call, e: IOException) = post(WebappInput.TicketMinted(gen, null))
 
                 override fun onResponse(call: Call, response: Response) {
+                    keepCookies(response)
                     if (response.code == 401 || response.code == 403) {
                         response.close()
                         return post(WebappInput.TicketMinted(gen, null, signedOut = true))
@@ -145,6 +147,7 @@ internal class GatewayMonitorLink(
             .build()
         socket = sockets.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                keepCookies(response)
                 handler.post {
                     if (gen != this@GatewayMonitorLink.gen) return@post
                     handler.removeCallbacks(ping)
@@ -397,6 +400,22 @@ internal class GatewayMonitorLink(
     }
 
     /** Runs [input] on the handler thread; by then a newer attempt may have made it stale, which the reducer drops. */
+    // Nous sign-in rotates its single-use refresh token on any request that refreshes, so a
+    // refreshed cookie dropped here makes the page replay a spent token and lose the session.
+    private fun keepCookies(response: Response) {
+        val fresh = response.headers("Set-Cookie")
+        if (fresh.isEmpty()) return
+        val url = response.request.url.toString()
+        handler.post {
+            runCatching {
+                val jar = CookieManager.getInstance()
+                fresh.forEach { jar.setCookie(url, it) }
+                jar.flush()
+                endpoint?.let { cookie = jar.getCookie(it.origin) }
+            }
+        }
+    }
+
     private fun post(input: WebappInput) {
         handler.post { deliver(input) }
     }
