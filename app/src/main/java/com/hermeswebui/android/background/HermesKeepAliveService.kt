@@ -39,16 +39,23 @@ class HermesKeepAliveService : Service() {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
             )
         } catch (error: IllegalStateException) {
-            Log.w(TAG, "Keep-alive could not enter the foreground", error)
-            stopSelf()
-            return START_NOT_STICKY
+            return refused(error)
         } catch (error: SecurityException) {
-            Log.w(TAG, "Keep-alive could not enter the foreground", error)
-            stopSelf()
-            return START_NOT_STICKY
+            return refused(error)
         }
         WebappGatewayCoordinator.restoreService(applicationContext)
         return START_STICKY
+    }
+
+    /** Android refused the foreground start (a restart from the background): say so instead of going quiet. */
+    private fun refused(error: Exception): Int {
+        Log.w(TAG, "Keep-alive could not enter the foreground", error)
+        WebappGatewayCoordinator.postWarning(
+            this, R.string.webapp_background_stopped_title, R.string.webapp_background_stopped_body,
+            WebappGatewayCoordinator.STOPPED_WARNING_ID,
+        )
+        stopSelf()
+        return START_NOT_STICKY
     }
 
     private fun ongoingNotification(): Notification =

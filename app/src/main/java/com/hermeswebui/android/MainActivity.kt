@@ -566,6 +566,14 @@ class MainActivity : ComponentActivity() {
         proxyAuthNavigation.clear()
         stopVpnReconnectWaitLoop()
         runCatching { unregisterReceiver(appUpdateDownloadReceiver) }
+        // The keep-alive service outlives this Activity in the same process, so a WebView left
+        // undestroyed keeps its renderer process and this Activity in memory until the process dies.
+        trackedPopups.toList().forEach(::destroyPopup)
+        if (::webView.isInitialized) {
+            webView.stopLoading()
+            (webView.parent as? ViewGroup)?.removeView(webView)
+            runCatching { webView.destroy() }
+        }
         super.onDestroy()
     }
 

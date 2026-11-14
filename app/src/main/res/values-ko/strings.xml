@@ -6,6 +6,10 @@
     <string name="webapp_alert_approval">승인 필요</string>
     <string name="webapp_alert_question">질문</string>
     <string name="webapp_alert_background">백그라운드 작업 완료</string>
+    <string name="webapp_answer_not_sent">전송 안 됨, 다시 시도</string>
+    <string name="webapp_answer_uncertain">전송됐을 수 있음, 채팅에서 확인</string>
+    <string name="webapp_background_stopped_title">백그라운드 알림 꺼짐</string>
+    <string name="webapp_background_stopped_body">Android가 Hermes의 백그라운드 실행을 막았어요. Hermes를 열면 알림이 다시 와요. 설정에서 배터리를 제한 없음으로 두면 이 문제가 생기지 않아요.</string>
     <string name="webapp_signin_needed_title">백그라운드 알림 중지됨</string>
     <string name="webapp_signin_needed_body">Hermes 게이트웨이가 로그인을 더 이상 받지 않아요. Hermes를 열고 다시 로그인하면 알림이 다시 와요.</string>
     <plurals name="webapp_alert_summary_count">

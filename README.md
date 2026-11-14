@@ -96,9 +96,16 @@ flowchart LR
 <details>
 <summary><strong>Staying alive</strong></summary>
 
-- **The monitor lives in the service**, not in the activity. Swiping Hermes
-  away from Recents keeps alerts coming, and the service restores the monitor
-  if Android restarts it.
+- **The monitor lives in the service**, not in the activity or the page. It
+  starts whenever Hermes is hidden and the server is known to be a Webapp, even
+  if you leave before the page connects. Swiping Hermes away from Recents keeps
+  alerts coming, and the service restores the monitor if Android restarts it.
+- **Starts after a reboot or an app update**, without opening the app.
+- **Keeps the sign-in fresh.** It stores the cookies the gateway rotates and
+  refreshes the sign-in every 6 hours, so a day in the background doesn't sign
+  you out.
+- **Says so when it can't run.** If Android refuses the background start, a
+  **Background alerts stopped** notice appears instead of silence.
 - **`specialUse` foreground service**, so there is no daily runtime cap.
 - **Reconnects on its own.** Retries back off from 1 to 30 seconds, and a change
   of default network redials at once. A socket whose `gateway.ready` or
@@ -137,9 +144,10 @@ notifications are held back so they never duplicate a native one.
 
 > [!IMPORTANT]
 > A notification answer is shown as sent only after the gateway confirms it.
-> If no receipt arrives, the alert says the answer **may have been sent** and
-> hides its buttons, so it can't be sent twice. If there is no connection to
-> send on, it says so and the buttons stay. Receipts need the
+> If no receipt arrives, the alert's subtitle says the answer **may have been
+> sent** and its buttons are hidden, so it can't be sent twice. If there is no
+> connection to send on, the subtitle says **not sent** and the buttons stay.
+> The command or question stays readable either way. Receipts need the
 > [gateway hook](#-gateway-hook).
 
 ## 🧩 Gateway hook
@@ -191,7 +199,6 @@ Everything is under **Application Settings › Notifications**:
 
 | Limit | Why |
 |---|---|
-| After a reboot, alerts start once the app has been opened | Nothing starts the service at boot |
 | A very short turn can be missed | A turn that starts and ends within the 10-second list interval, in a chat that wasn't watched, is never seen |
 | Bot chats in another profile aren't watched | The monitor connects for the gateway's launch profile only |
 | A prompt answered on another device stays in the tray | The gateway sends no event for that. Opening the app clears it |

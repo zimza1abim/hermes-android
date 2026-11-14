@@ -105,6 +105,8 @@ data class WebappState(
     val doc: DocId? = null,
     /** A Webapp document has activated monitoring for this background run. */
     val webappActive: Boolean = false,
+    /** The current server showed a Webapp document before; the shell keeps this across process restarts. */
+    val known: Boolean = false,
     /** Open server requests by the server's id, which is the same on the page's sockets and the monitor's. */
     val prompts: Map<RpcId, OpenPrompt> = emptyMap(),
     /** Requests answered or withdrawn, newest last, so a late copy from a slower socket cannot reopen one. */
@@ -161,6 +163,9 @@ sealed interface TrayReply {
 /** Why an alert was posted; the shell shows it as the notification's short subtext. */
 enum class AlertReason { COMPLETE, ERROR, INTERRUPTED, APPROVAL, QUESTION, BACKGROUND }
 
+/** What happened to a tray answer; the shell shows it beside the reason and leaves the body alone. */
+enum class AlertNote { NOT_SENT, UNCERTAIN }
+
 /** What the shell renders. The title and body are already removed when previews are off. */
 data class Alert(
     val kind: GatewayAlertKind,
@@ -174,6 +179,7 @@ data class Alert(
     val body: String?,
     /** Null when the alert is tap-only. */
     val actions: AlertActions?,
+    val note: AlertNote? = null,
 )
 
 /** Inputs, already validated by the shell. Raw bridge and socket text never reaches the reducer. */
@@ -192,6 +198,8 @@ sealed interface WebappInput {
     data class SettingsChanged(val settings: WebappBackgroundSettings) : WebappInput
     /** An alert tap brought the app forward and names the session to open. */
     data class FocusRequested(val sessionId: String) : WebappInput
+    /** Whether the shell remembers a Webapp document on the current server. */
+    data class KnownWebapp(val known: Boolean) : WebappInput
     data object DocumentGone : WebappInput
     data object ServerChanged : WebappInput
     /** A different network became the default while keep-alive runs. */
@@ -236,8 +244,10 @@ sealed interface WebappEffect {
 
 /**
  * Every Webapp background decision, pure and total. Invariants (each pinned by a test):
- *  - Keep-alive is on exactly while the setting is on, the app is hidden and a gateway document is
- *    live. [WebappEffect.KeepAlive] is emitted only when that value changes. The native monitor is
+ *  - Keep-alive is on exactly while the setting is on, the app is hidden and the server is a Webapp:
+ *    a gateway document is live, or one was seen on this server before ([WebappState.known]), so
+ *    leaving before the page connects or a restarted process still monitors.
+ *    [WebappEffect.KeepAlive] is emitted only when that value changes. The native monitor is
  *    wanted exactly while keep-alive is on; it attaches to [watchSet].
  *  - A prompt is one server request, keyed by the server's id, however many sockets delivered it.
  *    It stays open while some route still reaches it; an answer, a page response, a withdrawal or the
@@ -279,7 +289,8 @@ object WebappAlertReducer {
         return next to (actions + diffPrompts(state, next) + keepAliveChange(state, next) + monitorEffects + focus)
     }
 
-    fun keepAlive(state: WebappState): Boolean = state.settings.keepAlive && !state.visible && state.webappActive
+    fun keepAlive(state: WebappState): Boolean =
+        state.settings.keepAlive && !state.visible && (state.webappActive || state.known)
 
     /**
      * Stored ids the monitor attaches to: the page's current chat, chats with a running turn and chats
@@ -313,14 +324,15 @@ object WebappAlertReducer {
             is WebappInput.Visibility -> state.copy(visible = input.visible).alone()
             is WebappInput.SettingsChanged -> state.copy(settings = input.settings).alone()
             is WebappInput.FocusRequested -> state.copy(focus = input.sessionId).alone()
+            is WebappInput.KnownWebapp -> state.copy(known = input.known).alone()
             WebappInput.DocumentGone -> state.copy(doc = null, focus = null,
                 webappActive = !state.visible && state.webappActive).dropRoutes { it is PromptRoute.Page }.alone()
-            WebappInput.ServerChanged -> state.copy(doc = null, focus = null, webappActive = false,
+            WebappInput.ServerChanged -> state.copy(doc = null, focus = null, webappActive = false, known = false,
                 sessions = emptyMap(), pageSession = null, seen = emptyList(), settled = emptyList(),
                 oneShots = emptyMap(), prompts = emptyMap()).alone()
             is WebappInput.Hello ->
                 (if (state.doc == input.doc) state
-                else state.copy(doc = input.doc, focus = null, webappActive = true).dropRoutes { it is PromptRoute.Page }).alone()
+                else state.copy(doc = input.doc, focus = null, webappActive = true, known = true).dropRoutes { it is PromptRoute.Page }).alone()
             is WebappInput.Inbound ->
                 if (state.doc != input.doc) state.alone() else inbound(state, PromptRoute.Page(input.sock), input.event)
             is WebappInput.Responded ->
@@ -511,10 +523,10 @@ object WebappAlertReducer {
             )
         }
         return result.copy(
-            body = when {
-                prompt.answerUncertain -> "Answer may have been sent. Open the chat to check before responding again."
-                prompt.answerFailed -> "Not sent: connection unavailable. Try again when connected."
-                else -> result.body
+            note = when {
+                prompt.answerUncertain -> AlertNote.UNCERTAIN
+                prompt.answerFailed -> AlertNote.NOT_SENT
+                else -> null
             },
             actions = if (prompt.sending || prompt.answerUncertain) null else result.actions,
         )

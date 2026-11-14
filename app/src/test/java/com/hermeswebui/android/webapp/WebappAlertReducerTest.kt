@@ -72,6 +72,16 @@ class WebappAlertReducerTest {
     }
 
     @Test
+    fun `a server known as a Webapp keeps alive without a live document until the server changes`() {
+        assertThat(effectsOf(Visibility(false))).isEmpty()
+        assertThat(effectsOf(WebappInput.KnownWebapp(true), Visibility(false))).containsExactly(KeepAlive(true))
+        // Shown, a new document starts loading, and the app is left before the page says hello.
+        assertThat(allEffects(*hidden, Visibility(true), DocumentGone, Visibility(false)).filterIsInstance<KeepAlive>())
+            .containsExactly(KeepAlive(true), KeepAlive(false), KeepAlive(true)).inOrder()
+        assertThat(effectsOf(*hidden, WebappInput.ServerChanged)).containsExactly(KeepAlive(false))
+    }
+
+    @Test
     fun `keep-alive is emitted only on transitions`() {
         assertThat(effectsOf(*hidden, Hello(doc))).isEmpty()
         assertThat(effectsOf(*hidden, Hello(DocId("doc-b")))).isEmpty()
@@ -194,7 +204,8 @@ class WebappAlertReducerTest {
     fun `a failed send re-posts the prompt and a successful one forgets it`() {
         val opened = arrayOf(*hidden, Inbound(doc, 1, approval))
         val failed = effectsOf(*opened, SendResult(approvalId, ok = false)).filterIsInstance<Post>().single()
-        assertThat(failed.alert.body).contains("Not sent")
+        assertThat(failed.alert.note).isEqualTo(AlertNote.NOT_SENT)
+        assertThat(failed.alert.body).isEqualTo(effectsOf(*opened).filterIsInstance<Post>().single().alert.body)
         val (state, effects) = run(*opened, SendResult(approvalId, ok = true))
         assertThat(effects).contains(Cancel(GatewayAlertKind.APPROVAL, approvalKey))
         assertThat(state.prompts).isEmpty()

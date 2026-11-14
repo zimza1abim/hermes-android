@@ -60,21 +60,40 @@ class WebappGatewayCoordinator private constructor(
         uiOwner = owner
         isTrustedSource = trusted
         trustedPageOrigin = origin
+        dispatch(WebappInput.KnownWebapp(isKnown()))
     }
 
-    /** A restarted service can restore monitoring without an Activity or WebView. */
+    /** A restarted or boot-started service restores monitoring without an Activity or WebView. */
     fun startHeadless() {
         ensureReceiver()
         restoreWatch()
-        dispatch(WebappInput.Hello(DocId("service")))
+        keepAliveRunning = true
+        dispatch(WebappInput.KnownWebapp(isKnown()))
         dispatch(WebappInput.Visibility(false))
-        dispatch(WebappInput.DocumentGone)
+        if (!WebappAlertReducer.keepAlive(state)) stopKeepAliveService()
+    }
+
+    /** The service started on its own (a boot broadcast) while this process already runs: keep it only if wanted. */
+    private fun adoptService() {
+        if (WebappAlertReducer.keepAlive(state)) keepAliveRunning = true
+        else if (!stopPending) stopKeepAliveService()
+    }
+
+    private fun isKnown(): Boolean = watchKey()?.let { watchPrefs.getBoolean(KNOWN_PREFIX + it, false) } == true
+
+    /** Remembers that this server showed a Webapp document, so the next process needs no page to monitor it. */
+    private fun rememberKnown() {
+        if (knownSaved || !state.webappActive) return
+        val key = watchKey() ?: return
+        knownSaved = true
+        watchPrefs.edit().putBoolean(KNOWN_PREFIX + key, true).apply()
     }
 
     /** Document-start and runtime tap script, built from the parser's own marker list. */
     val tapScript: String = HermesWebUiScripts.buildWebappGatewayTapScript(bridgeName, GatewayProtocol.WATCHED_MARKERS)
 
     private var state = WebappState(initialSettings)
+    private var knownSaved = false
     private val pending = ArrayDeque<WebappInput>()
     private var dispatching = false
 
@@ -86,6 +105,7 @@ class WebappGatewayCoordinator private constructor(
 
     private val handler = Handler(Looper.getMainLooper())
     private var keepAliveRunning = false
+    private var stopPending = false
     private val deferredStop = Runnable { stopKeepAliveService() }
     private val connectivity: ConnectivityManager? = context.getSystemService(ConnectivityManager::class.java)
     private var networkWatch: NetworkWatch? = null
@@ -155,7 +175,9 @@ class WebappGatewayCoordinator private constructor(
         val currentServerUrl = serverUrl()
         if (currentServerUrl != previousServerUrl) {
             previousServerUrl = currentServerUrl
+            knownSaved = false
             dispatch(WebappInput.ServerChanged)
+            dispatch(WebappInput.KnownWebapp(isKnown()))
         } else dispatch(WebappInput.DocumentGone)
     }
 
@@ -216,6 +238,7 @@ class WebappGatewayCoordinator private constructor(
             }
             if (trayChanges.isNotEmpty()) refreshGroups(trayChanges.toMap())
             persistWatch()
+            rememberKnown()
         } finally {
             trayChanges.clear()
             dispatching = false
@@ -228,7 +251,7 @@ class WebappGatewayCoordinator private constructor(
     }
 
     private fun persistWatch() {
-        if (state.visible || !state.webappActive) return
+        if (state.visible || !(state.webappActive || state.known)) return
         val key = watchKey() ?: return
         val ids = WebappAlertReducer.watchSet(state).toSet()
         val rows = JSONArray()
@@ -326,11 +349,18 @@ class WebappGatewayCoordinator private constructor(
 
     private fun keepAlive(on: Boolean) {
         handler.removeCallbacks(deferredStop)
+        stopPending = !on
         if (on) {
-            if (!keepAliveRunning) keepAliveRunning = HermesKeepAliveService.start(context)
+            if (!keepAliveRunning) {
+                keepAliveRunning = HermesKeepAliveService.start(context)
+                if (!keepAliveRunning) postWarning(context, R.string.webapp_background_stopped_title,
+                    R.string.webapp_background_stopped_body, STOPPED_WARNING_ID)
+            }
             watchNetwork()
         } else if (state.visible) {
-            stopKeepAliveService()
+            // Not at once: a screen-off launch shows the app for an instant, and Android refuses to
+            // start the service again from the background that follows.
+            handler.postDelayed(deferredStop, VISIBLE_STOP_GRACE_MS)
         } else {
             // Hidden, but the document went away (a reload in the background). A new document
             // usually follows within seconds, and a hidden app may not be allowed to start again.
@@ -339,6 +369,7 @@ class WebappGatewayCoordinator private constructor(
     }
 
     private fun stopKeepAliveService() {
+        stopPending = false
         keepAliveRunning = false
         HermesKeepAliveService.stop(context)
         networkWatch?.let { watch ->
@@ -403,20 +434,8 @@ class WebappGatewayCoordinator private constructor(
             ?.forEach { manager.cancel(it.tag, it.id) }
     }
 
-    @SuppressLint("MissingPermission")
     private fun notifyWarning(titleRes: Int, bodyRes: Int, id: Int) {
-        if (!HermesKeepAliveService.canPostNotifications(context) || state.visible) return
-        val body = context.getString(bodyRes)
-        val notification = NotificationCompat.Builder(context, QUIET_WARNING_CHANNEL)
-            .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(context.getString(titleRes))
-            .setContentText(body)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
-            .setContentIntent(HermesKeepAliveService.openAppIntent(context))
-            .setAutoCancel(true)
-            .setOnlyAlertOnce(true)
-            .build()
-        runCatching { NotificationManagerCompat.from(context).notify(QUIET_WARNING_TAG, id, notification) }
+        if (!state.visible) postWarning(context, titleRes, bodyRes, id)
     }
 
     @SuppressLint("MissingPermission")
@@ -426,6 +445,7 @@ class WebappGatewayCoordinator private constructor(
         if (update && !isShown(id)) return
         val title = alert.title ?: context.getString(R.string.app_name)
         val reason = context.getString(alert.reason.labelRes)
+        val subText = alert.note?.let { "$reason · ${context.getString(it.labelRes)}" } ?: reason
         val publicVersion = NotificationCompat.Builder(context, alert.kind.channelId)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(context.getString(R.string.app_name))
@@ -436,7 +456,7 @@ class WebappGatewayCoordinator private constructor(
             .setColor(ContextCompat.getColor(context, R.color.brand_sky))
             .setLargeIcon(largeIcon)
             .setContentTitle(title)
-            .setSubText(reason)
+            .setSubText(subText)
             .setOnlyAlertOnce(update)
             .setContentIntent(
                 HermesKeepAliveService.openAppIntent(context, alert.sessionId, alert.kind.notificationId(alert.key))
@@ -484,7 +504,7 @@ class WebappGatewayCoordinator private constructor(
         }.isSuccess
         if (posted) {
             trayChanges[id] = ShownAlert(
-                id, AlertGroups.key(alert.sessionId), title, digest(reason, alert.body), alert.kind.channelId,
+                id, AlertGroups.key(alert.sessionId), title, digest(subText, alert.body), alert.kind.channelId,
                 System.currentTimeMillis(),
             )
         }
@@ -592,8 +612,41 @@ class WebappGatewayCoordinator private constructor(
 
         @Synchronized
         fun restoreService(context: Context) {
-            if (shared == null) obtain(context).startHeadless()
+            val existing = shared
+            if (existing == null) obtain(context).startHeadless() else existing.adoptService()
         }
+
+        /** Whether a process with no Activity (after boot or an app update) should start monitoring. */
+        fun wantsHeadlessStart(context: Context): Boolean {
+            val app = context.applicationContext
+            val repository = SettingsRepository(app)
+            if (!repository.getWebappBackgroundSettings().keepAlive) return false
+            val url = repository.getSettings("", "").serverUrl.takeIf { it.isNotBlank() } ?: return false
+            val key = MessageDigest.getInstance("SHA-256").digest(url.toByteArray(Charsets.UTF_8))
+                .joinToString("") { "%02x".format(it) }
+            return app.getSharedPreferences("hermes_monitor_watch", Context.MODE_PRIVATE).getBoolean(KNOWN_PREFIX + key, false)
+        }
+
+        /** A notice that background alerts are degraded or stopped; opening the app clears it. */
+        @SuppressLint("MissingPermission")
+        fun postWarning(context: Context, titleRes: Int, bodyRes: Int, id: Int) {
+            if (!HermesKeepAliveService.canPostNotifications(context)) return
+            createChannels(context)
+            val body = context.getString(bodyRes)
+            val notification = NotificationCompat.Builder(context, QUIET_WARNING_CHANNEL)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle(context.getString(titleRes))
+                .setContentText(body)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+                .setContentIntent(HermesKeepAliveService.openAppIntent(context))
+                .setAutoCancel(true)
+                .setOnlyAlertOnce(true)
+                .build()
+            runCatching { NotificationManagerCompat.from(context).notify(QUIET_WARNING_TAG, id, notification) }
+        }
+
+        const val STOPPED_WARNING_ID = 20_024
+        private const val KNOWN_PREFIX = "known:"
 
         const val ACTION_ANSWER = "com.hermeswebui.android.action.WEBAPP_ANSWER"
         private const val ANSWER_SCHEME = "hermes-webapp-answer"
@@ -603,6 +656,7 @@ class WebappGatewayCoordinator private constructor(
         private const val EXTRA_CHOICE = "com.hermeswebui.android.extra.WEBAPP_CHOICE"
         private const val KEY_REPLY = "com.hermeswebui.android.extra.WEBAPP_REPLY"
         private const val KEEP_ALIVE_STOP_GRACE_MS = 15_000L
+        private const val VISIBLE_STOP_GRACE_MS = 5_000L
         private const val NETWORK_SETTLE_MS = 1_000L
         private const val MAX_SESSION_ID = 256
         private const val SUMMARY_TAG = "hermes.webapp.summary"
@@ -625,6 +679,12 @@ class WebappGatewayCoordinator private constructor(
             val first = body?.lineSequence()?.map { it.trim() }?.firstOrNull { it.isNotEmpty() }
             return if (first == null) reason else "$reason · $first"
         }
+
+        private val AlertNote.labelRes: Int
+            get() = when (this) {
+                AlertNote.NOT_SENT -> R.string.webapp_answer_not_sent
+                AlertNote.UNCERTAIN -> R.string.webapp_answer_uncertain
+            }
 
         private val AlertReason.labelRes: Int
             get() = when (this) {

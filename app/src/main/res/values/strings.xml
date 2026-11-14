@@ -94,6 +94,10 @@
         <item quantity="one">%d update</item>
         <item quantity="other">%d updates</item>
     </plurals>
+    <string name="webapp_answer_not_sent">Not sent, try again</string>
+    <string name="webapp_answer_uncertain">May have been sent, check the chat</string>
+    <string name="webapp_background_stopped_title">Background alerts stopped</string>
+    <string name="webapp_background_stopped_body">Android did not let Hermes keep running in the background. Open Hermes to resume alerts. Allowing unrestricted battery use in Settings prevents this.</string>
     <string name="webapp_signin_needed_title">Background alerts paused</string>
     <string name="webapp_signin_needed_body">The Hermes gateway no longer accepts this sign-in. Open Hermes and sign in again to resume alerts.</string>
     <string name="webapp_quiet_fallback_title">Hermes gateway compatibility</string>
