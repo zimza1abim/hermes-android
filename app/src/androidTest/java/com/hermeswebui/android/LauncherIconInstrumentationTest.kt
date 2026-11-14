@@ -4,10 +4,12 @@ import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import androidx.core.content.pm.ShortcutManagerCompat
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.google.common.truth.Truth.assertThat
+import com.hermeswebui.android.launcher.AppShortcuts
 import com.hermeswebui.android.launcher.LauncherIcon
 import com.hermeswebui.android.launcher.LauncherIconManager
 import org.junit.Test
@@ -36,6 +38,28 @@ class LauncherIconInstrumentationTest {
             val launchers = context.packageManager.queryIntentActivities(intent, 0)
             assertThat(launchers).hasSize(1)
             assertThat(launchers.single().activityInfo.name).isEqualTo(LauncherIcon.AGENT.aliasName)
+        } finally {
+            manager.select(original)
+        }
+    }
+
+    @Test
+    fun settingsShortcutFollowsTheEnabledLauncherAliasAndOpensTheRecoveryRoute() {
+        val manager = LauncherIconManager(context)
+        val original = manager.selectedIcon()
+        try {
+            for (choice in listOf(LauncherIcon.AGENT, LauncherIcon.WEBUI, LauncherIcon.AGENT)) {
+                // The real icon switch must republish: Android removes a dynamic shortcut whose
+                // alias is disabled, which would make the Settings shortcut vanish (Issue #194).
+                manager.select(choice)
+                val shortcut = ShortcutManagerCompat.getDynamicShortcuts(context)
+                    .single { it.id == AppShortcuts.SETTINGS_SHORTCUT_ID }
+                assertThat(shortcut.activity).isEqualTo(ComponentName(context.packageName, choice.aliasName))
+                assertThat(shortcut.intent.action).isEqualTo(Intent.ACTION_VIEW)
+                assertThat(shortcut.intent.data).isEqualTo(Uri.parse("hermes://app/settings"))
+                assertThat(context.packageManager.resolveActivity(shortcut.intent, 0)?.activityInfo?.name)
+                    .isEqualTo(MainActivity::class.java.name)
+            }
         } finally {
             manager.select(original)
         }

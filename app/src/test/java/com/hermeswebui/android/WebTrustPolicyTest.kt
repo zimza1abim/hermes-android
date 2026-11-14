@@ -25,10 +25,39 @@ class WebTrustPolicyTest {
     }
 
     @Test
+    fun `HTTP authentication challenges are limited to the configured server host`() {
+        assertThat(policy.isTrustedHttpAuthHost("hermes.example.com")).isTrue()
+        assertThat(policy.isTrustedHttpAuthHost("HERMES.EXAMPLE.COM.")).isTrue()
+        assertThat(policy.isTrustedHttpAuthHost("api.hermes.example.com")).isFalse()
+        assertThat(policy.isTrustedHttpAuthHost("dashboard.example.com")).isFalse()
+        assertThat(policy.isTrustedHttpAuthHost(null)).isFalse()
+    }
+
+    @Test
     fun `notification target must remain on the configured WebUI route`() {
         assertThat(policy.isTrustedNotificationTarget("https://hermes.example.com/session/123")).isTrue()
         assertThat(policy.isTrustedNotificationTarget("https://dashboard.example.com/app")).isFalse()
         assertThat(policy.isTrustedNotificationTarget("https://api.hermes.example.com/session/123")).isFalse()
+    }
+
+    @Test
+    fun `notification targets cannot restore removed or changed URL credentials`() {
+        val oldRoute = "https://User:p%40ss@hermes.example.com/session/123"
+        assertThat(policy.isTrustedNotificationTarget(oldRoute)).isFalse()
+
+        val configured = WebTrustPolicy(
+            urlPolicy = UrlPolicy(setOf("hermes.example.com")),
+            configuredWebUiUrl = "https://User:p%40ss@hermes.example.com",
+            configuredDashboardUrl = ""
+        )
+        assertThat(configured.isTrustedNotificationTarget(oldRoute)).isTrue()
+        assertThat(configured.isTrustedNotificationTarget("https://hermes.example.com/session/123")).isTrue()
+        assertThat(configured.isTrustedNotificationTarget("https://user:p%40ss@hermes.example.com/session/123"))
+            .isFalse()
+        assertThat(configured.isTrustedNotificationTarget("https://User:other@hermes.example.com/session/123"))
+            .isFalse()
+        assertThat(configured.isTrustedNotificationTarget("https://User:p@ss@hermes.example.com/session/123"))
+            .isFalse()
     }
 
     @Test

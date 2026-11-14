@@ -3,12 +3,59 @@
 > Maintenance-focused Android wrapper for Hermes Web UI. The core wrapper is
 > good as-is; product UI and workflow changes belong in Hermes WebUI.
 >
-> Last updated: 2026-11-09
+> Last updated: 2026-11-13
 
 ---
 
 ## Status snapshot
 
+- [~] Issue #184 passkey investigation: AndroidX Credential Manager is
+  included with the same dependency path in every WebView build, without the
+  optional Play Services adapter. This keeps F-Droid, GitHub, and Play uniform
+  but may limit compatibility on older devices. End-to-end passkey behavior
+  remains unverified and depends on Android/WebView support, a credential
+  provider, and Digital Asset Links on the identity-provider sign-in domain
+  for the exact app package/signing certificate. The separate blank
+  Dashboard-after-Basic-login symptom is linked to Hermes Agent issue
+  [#142352](https://github.com/NousResearch/hermes-agent/issues/142352); a
+  shared root cause is not established. The reporter still cannot complete
+  Pocket ID passkey sign-in on v1.2.2; Pocket ID may reject Android-app
+  WebAuthn origins even with an association
+  ([pocket-id/pocket-id#1845](https://github.com/pocket-id/pocket-id/issues/1845)).
+  No live Pocket ID flow has been verified. Issue #190 addresses an
+  Android-side viewport collapse that can blank a Dashboard used as the
+  server URL; the reporter's setup is still to be confirmed.
+- [~] Issue #184 follow-up: proxy-gateway OAuth and optional **Sign in with
+  Chrome**. A sign-in gateway approved through proxy consent (for example
+  TinyAuth) may start OIDC whose callback returns to that exact gateway origin;
+  the provider now stays in the app so the gateway's state cookie is present
+  (the reported "OAuth session cookie missing"). The opt-in setting opens
+  trusted OAuth starts in a Chrome Auth Tab and loads only a verified callback
+  back in the WebView; it needs Chrome 137+, an https callback, and
+  assetlinks.json on the callback host for the installed package/signing key,
+  and falls back to in-app sign-in otherwise. API 35 loopback tests cover the
+  in-app gateway flow and the http-callback fallback; a real Auth Tab round trip,
+  live TinyAuth/Pocket ID, and reporter acceptance are not verified.
+- [~] Issue #184 follow-up: the app no longer remembers credentials entered in
+  the HTTP Basic prompt or supplies previously remembered credentials. Legacy
+  encrypted data remains unused until explicitly deleted via **Forget saved
+  sign-ins**. WebView may reuse same-origin credentials in memory, and saved
+  server URLs and default profile names can still contain credentials.
+  Startup, reconnect, notification, workspace-recovery and Back paths reject
+  old URL credentials after the configured credentials change; this is not a
+  sign-out and does not clear WebView's authentication cache. Reporter
+  acceptance remains open.
+- [ ] Server-switch callback identity: a late WebView callback with unchanged
+  or absent URL credentials can still affect the selected route or error state,
+  including after returning to the same server. WebView does not provide a
+  navigation ID; retain the mounted WebView while a non-destructive solution
+  is investigated in #184. Navigation can still discard page state.
+- [ ] Local-network recovery follow-up in #184: failed form submissions and
+  older HTTP OAuth pages reached through Back may require a manual retry after
+  permission is granted; unhandled permission errors do not auto-retry, replay
+  a POST as a GET, or infer that a history entry belongs to the current OAuth flow.
+  The Retry action starts again at the configured server.
+- [x] Proxy-level HTTP Basic authentication ([Issue #185](https://github.com/hermes-webui/hermes-android/issues/185)): main and popup WebViews prompt for credentials on challenges from the configured server host only. Hermes-Android does not remember prompt credentials; an API 36 loopback test covers the challenge and authenticated page, but no emulator was available for local execution.
 - [x] First-run and Servers setup help: copy separate guided Hermes-chat prompts
   for community WebUI and official WebApp; explain host-vs-phone access,
   authentication, HTTPS and reusable URLs. Include the requested AGP 9.5.1
@@ -89,7 +136,8 @@ remains tracked by #141 and fdroiddata merge request 55480.
 ### Android integration
 
 - [~] Official Hermes Webapp hosting (v0.22.6+): automatic renderer recognition,
-  Back-to-Settings without a workspace reload, shared Android WebView
+  hash-only Back navigation without a workspace reload (Back-to-Settings was
+  replaced by normal Back in BUG-064, Issue #194), shared Android WebView
   integrations, and WebUI-shim isolation. Authenticated live Webapp acceptance
   remains pending; loopback fixtures do not establish upstream UI behavior.
   Regression evidence: readiness fallback, sign-in-return persistence and
@@ -185,7 +233,7 @@ sketches are captured inline below.
 - [~] Instrumentation tests (deep links, exported download host, allowlist) wired into CI (B1): all current instrumentation classes now run for Android changes and releases; the listed navigation/security cases remain to be added
 - [x] Unit tests covering the committee fixes: update-APK host allowlist, gateway `enabled` absent/false, profile `isActive` derivation (B2)
 - [~] detekt/ktlint + Android Lint gate in CI (B3): Android Lint is required; detekt/ktlint remain open
-- [ ] App shortcuts for Settings + server switch (C1)
+- [~] App shortcuts for Settings + server switch (C1): Settings shortcut shipped (BUG-064); server-switch shortcuts remain
 - [ ] Direct Share targets to recent sessions (C2)
 - [ ] Predictive-back + per-app language polish (C3)
 
@@ -215,10 +263,22 @@ sketches are captured inline below.
 |---|---|---|---|
 | NOTIF-002 | 2026-11-09 | Notifications / Background | Kept the official Webapp's gateway connection alive in the background and added native alerts for finished, failed and background tasks, questions, and approvals (Allow needs an unlocked phone), each on its own channel in a "Hermes Agent" group with per-kind switches, a preview switch and a keep-alive switch in Settings > Notifications. The app is now named "Hermes" and new installs default to the Agent launcher icon. |
 | CLEANUP-006 | 2026-11-09 | Troubleshooting | Removed the debug log capture feature (DBG-001, DBG-002): the Settings "Capture debug logs" switch with its Share log / Save log buttons, the debug-build floating Save log overlay, the logcat foreground service and its "Debug logging is running" notification, and the debug-build auto-start that re-enabled capture on every launch. Troubleshooting keeps the GitHub issue links; the diagnostic breadcrumb file is unchanged |
+| BUG-062 | 2026-11-12 | Authentication | Issue #184 follow-up: removed automatic reuse and saving of HTTP Basic credentials because WebView reports only the challenged host and realm, not its scheme or port. Manual masked sign-in remains available; previously saved encrypted data stays unused and can be explicitly deleted in Settings. Saved routes with outdated URL credentials are rejected after a server URL edit, including on startup, reconnect, notification, workspace recovery and Back; main-frame requests exposing outdated credentials are blocked, and history containing them is cleared when the server changes. Loopback and Settings regressions were RED on the base and GREEN on API 35; live reporter acceptance remains open. |
+| BUG-064 | 2026-11-13 | Navigation | Issue #194: Android Back no longer opens Application Settings. WebUI walks history, the official Webapp walks only same-document hash entries (never reloading the workspace or returning to sign-in), then both use the BUG-016 press-again-to-exit confirmation, superseding the BUG-026 Settings step. Settings stays reachable without a working page through a new launcher long-press Settings shortcut (republished on launcher-icon switches) and the existing error-screen Edit server URL button; the ongoing background-activity notification (shown only while backgrounded with that setting on) also gains a Settings action. Covered by `SelectedServerNavigationTest`, `ProxyAuthRedirectInstrumentationTest`, `LauncherIconInstrumentationTest` and `HermesSessionMonitorInstrumentationTest` on the Pixel Fold API 36 emulator. |
+| BUG-063 | 2026-11-13 | WebView | Fixed the main WebView being hosted with WRAP_CONTENT layout params by Compose's `AndroidView`, which made Chromium lay the page out at zero height so `vh`/`dvh`/`svh`/`lvh` and `html{height:100%}` all measured 0 (Issue 184, found while investigating the missing Pocket ID cross-device QR, a `12dvh` canvas). `WebShell` now sets MATCH_PARENT; pinned by `WebViewSecurityContractTest` and `WebShellTest.hostedWebView_hasRealViewportUnits`. The viewport polyfill stays as a fallback. The Dashboard blank shell after Basic login (upstream cold-load `/` redirect race) and direct Pocket ID passkeys are not fixed by this |
+| BUG-061 | 2026-11-12 | WebView | Fixed Issue #190: a Hermes Agent Dashboard configured as the server URL rendered only its header because Android WebView evaluates its `h-dvh overflow-hidden` root as 0px and the viewport repair restored only an inner wrapper on the first pass, then capped the root at 82%. The repair now recognizes a collapsed page shell and restores it to the full viewport height in one pass, and the WebUI-only Enter, sidebar, Clarify and route-recovery shims now require a positive WebUI marker so the Dashboard no longer receives them. Emulator fixtures reproduce the Dashboard layout; a real device against a live Dashboard remains unverified pending the reporter's confirmation in #184. |
+| BUG-060 | 2026-11-12 | Authentication | Issue #184 follow-up: keep OIDC started by an approved proxy sign-in gateway in the app when its callback returns to that exact gateway origin, and add opt-in Sign in with Chrome (Auth Tab with verified callback return and in-app fallback). Also stop a server switch's `about:blank` placeholder from externalizing the new server's sign-in redirect or voiding its consent with a false "Server changed" (RED on an API 36 Fold emulator with Chrome in 4/4 and 4/5 runs per guard, GREEN 32/32 there and on API 35). API 35 loopback gateway tests were RED with the gateway trust removed and GREEN locally; real Auth Tab, live TinyAuth/Pocket ID, and reporter acceptance remain open. |
+| BUG-065 | 2026-11-13 | WebView | Fixed Issue #198: after editing the Current profile's credentials, the workspace-panel recovery could still target the old credentialed route, which the interceptor blocked with a "Navigation blocked" page. On WebView 156 a just-removed document-start script is still injected into the next navigation, and the recovery script let the first (stale) copy win. Every copy now records its URL so the newest install wins. `editingCurrentCredentials_refreshesDocumentStartRouteRecovery` was RED on the base and GREEN on an API 36 Pixel Fold emulator (WebView 156); CI's API 35/36 images do not reproduce the WebView behavior. |
+| BUG-059 | 2026-11-12 | Authentication | Issue #184 follow-up: mask native HTTP Basic passwords and allow an initial proxy redirect after consent when WebView has no committed URL, while rejecting consent after a later navigation. API 35 loopback regressions were RED on base and GREEN locally; live reporter acceptance and passkey sign-in remain open. |
+| BUG-058 | 2026-11-11 | Authentication | Fixed Issue #185: proxy-level HTTP Basic challenges from the configured server now show a native username/password dialog in main and popup WebViews. Credentials are never saved, and challenges from other hosts are canceled. JVM policy/source-contract tests pass; the API 36 loopback regression test compiles but was not run locally because no emulator/device is attached. |
 | BUG-057 | 2026-11-07 | Deep links | Fixed Issue #170: `hermes://session/{id}` and `hermes://app/settings` now work when the app starts from a closed state, not only through `onNewIntent`. A cold-start session link feeds the same trusted-route startup override as a notification tap, so `SelectedServerNavigation.startupUrl` still gates it, and the settings link is skipped on activity recreation. Two cold-start API 35 tests failed before the fix and pass after it. |
 | TEST-009 | 2026-11-07 | QA | Closed Issue #150's QA hardening (see QA-001). Added JVM-tested extractions for the LAN preflight, hardware-keyboard, SSE cookie and status-fallback rules, six OIDC/dead-URL/deep-link/Settings flow tests, notification-facade and long-press fixtures, client-certificate password cases and a server-switch session-wipe guard. Each guard was shown to fail when its rule was deliberately broken. |
 | REL-036 | 2026-11-07 | Release preparation | Prepared Android and README metadata for v1.2.0 (version code 10200): the first-run welcome guide (Issue #176) and cold-start `hermes://` deep links (Issue #170). A minor bump because it adds a user-facing feature with no breaking change. Published on 2026-11-07 by orchestration run 42393841270 from commit `402690a`: the GitHub release has exactly `hermes-webui-v1.2.0-github.apk`, and the Play production edit and English description were committed and verified through a fresh Publisher API edit. Play review and public availability are separate and were not confirmed. F-Droid picks up the tag after fdroiddata review (Issue #141). |
 | REL-037 | 2026-11-07 | Release preparation | Prepared Android and README metadata for v1.2.1 (version code 10201): image paste for the Hermes Agent Webapp and Gboard (Issue #180). A patch bump because it fixes broken behavior with no new setting. GitHub and Play production publication are pending the approved orchestration run; F-Droid picks up the tag after fdroiddata review (Issue #141). |
+| REL-038 | 2026-11-11 | Release preparation | Prepared Android and README metadata for v1.2.2 (version code 10202): shared WebView Credential Manager integration (Issue #184). A patch bump because it fixes broken behavior with no new setting. GitHub and Play production publication are pending the approved orchestration run; F-Droid picks up the tag after fdroiddata review (Issue #141). |
+| REL-039 | 2026-11-12 | Release preparation | Prepared Android and README metadata for v1.3.0 (version code 10300): sign-in improvements, removed app-saved Basic sign-ins, and Dashboard shell repair. A minor bump because it adds a user-facing feature with no breaking change. GitHub and Play production publication are pending the approved orchestration run; F-Droid picks up the tag after fdroiddata review (Issue #141). |
+| REL-040 | 2026-11-13 | Release preparation | Prepared Android and README metadata for v1.3.1 (version code 10301): zero-height WebView viewport units fix (Issue #184, PR #195). A patch bump because it fixes broken behavior with no new setting. GitHub and Play production publication are pending the approved orchestration run; F-Droid picks up the tag after fdroiddata review (Issue #141). |
+| REL-041 | 2026-11-13 | Release preparation | Prepared Android and README metadata for v1.3.2 (version code 10302): normal Back, Settings shortcut and notification action (Issue #194); route recovery after credential edits (Issue #198). A patch bump because it fixes broken behavior with no new setting. GitHub and Play production publication are pending the approved orchestration run; F-Droid picks up the tag after fdroiddata review (Issue #141). |
 | REL-035 | 2026-10-30 | Release / Distribution | Prepared F-Droid distribution for Issue #141. Added an MIT license. Moved Google Play Core into a new `play` build type, so the `github` APK and the new F-Droid `release` build (`com.hermeswebui.android.fdroid`) contain no Google Play code. `verifyFossDependencies` gates CI and the orchestrator. F-Droid's scanner went from 3 source problems on `main` to 0, and from 6 binary problems in the published v1.1.7 GitHub APK to 0 in the new `release` APK. The orchestrator still publishes GitHub and Play only; F-Droid picks up later tags after the one-time fdroiddata submission. |
 | BUG-056 | 2026-10-29 | Security / Authentication | Fixed Issue #134: in-WebView proxy sign-in consent is offered only when the hop that redirected is exactly the configured server origin. Redirects from another port, a subdomain, or the dashboard host on the allowlist are externalized instead of being attributed to the server. Reproduced RED on base (consent dialog shown for an allowlisted other-port redirector) and GREEN with unit and API 36 loopback tests. Form POST navigations remain attributed to the last recorded hop. |
 | BUG-055 | 2026-10-29 | Authentication / Setup | Fixed Issue #135: server checks now classify status redirects by origin. Same-origin sign-in redirects report "authentication required" without proxy consent, a same-host HTTP-to-HTTPS upgrade offers a re-validated **Use HTTPS** server URL, and only cross-origin redirects request proxy sign-in consent. Reproduced RED on base (consent requested for both cases) and GREEN with unit and API 36 loopback tests. |

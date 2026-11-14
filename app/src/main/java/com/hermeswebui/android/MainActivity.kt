@@ -20,6 +20,7 @@ import android.content.res.Configuration
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
+import android.text.InputType
 import android.util.Base64
 import android.os.Build
 import android.os.Bundle
@@ -28,16 +29,17 @@ import android.os.SystemClock
 import android.os.PowerManager
 import android.provider.Settings
 import android.view.MotionEvent
-import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.ClientCertRequest
 import android.webkit.CookieManager
+import android.webkit.HttpAuthHandler
 import android.webkit.PermissionRequest
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.ServiceWorkerController
 import android.webkit.SslErrorHandler
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
+import android.webkit.WebBackForwardList
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -45,6 +47,9 @@ import android.webkit.WebSettings
 import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.view.ViewGroup
+import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -52,7 +57,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresApi
+import androidx.browser.auth.AuthTabIntent
 import androidx.browser.customtabs.CustomTabColorSchemeParams
+import androidx.browser.customtabs.CustomTabsClient
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
@@ -88,6 +95,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.setValue
+import com.hermeswebui.android.launcher.AppShortcuts
 import com.hermeswebui.android.launcher.LauncherIconManager
 import com.hermeswebui.android.data.ServerType
 import androidx.compose.ui.Modifier
@@ -151,6 +159,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
+import java.security.MessageDigest
 
 private const val HermesNotificationBridgeName = "HermesAndroidNotifications"
 private const val HermesClipboardBridgeName = "HermesAndroidClipboard"
@@ -225,8 +234,21 @@ class MainActivity : ComponentActivity() {
     private var suppressClarifyAutofocusScriptHandler: ScriptHandler? = null
     private var lastVpnLaunchAttemptElapsedMs: Long = 0L
     private var pendingVpnGuardUrl: String? = null
+    private var pendingVpnOAuthRecoveryGeneration: Long? = null
+    private var vpnReconnectProbe: suspend (String) -> Boolean = { url ->
+        isVpnTransportActive() &&
+            HermesApiClient.isServerReachable(url, timeoutMs = VpnReconnectPollIntervalMs.toInt() - 100)
+    }
     private var vpnReconnectWaitJob: Job? = null
     private var tailscaleLaunchFallbackJob: Job? = null
+    private var serverSelectionGeneration = 0L
+    private data class ServerSelectionFence(
+        val selectedUrl: String,
+        val previousHosts: Set<String>,
+        val previousOrigins: Set<String>
+    )
+    @Volatile private var serverSelectionFence: ServerSelectionFence? = null
+    private var clearHistoryOnNextConfiguredPage = false
     private var activityVisible = false
     /** Bumped when a renderer loss replaces [webView], so Compose hosts the new view. */
     private var webViewGeneration by mutableIntStateOf(0)
@@ -252,15 +274,29 @@ class MainActivity : ComponentActivity() {
     private var activeOAuthPopup: WebView? = null
     private var activeOAuthFlow: OAuthPopupFlow? = null
     private var activeMainFrameOAuthFlow: OAuthPopupFlow? = null
+    private var allowedOAuthRecoveryUrl: String? = null
+    private var oauthRecoveryNavigationGeneration = 0L
     private val proxyAuthNavigation = ProxyAuthNavigation()
     // Last main-frame URL the app loaded, allowed, or committed. A redirect only speaks for the
     // configured server when this hop is exactly that origin (Issue #134).
     private var lastMainFrameHopUrl: String? = null
+    private var mainFrameNavigationGeneration = 0L
     private var serverTypeDocumentGeneration = 0L
     private var proxySignInDialog: android.app.AlertDialog? = null
+    private var pendingHttpAuthPrompt: PendingHttpAuthPrompt? = null
     private var oauthFlowTimeoutMs: Long = 0
     private val OAUTH_FLOW_TIMEOUT_MS = 5 * 60 * 1000L // 5 minutes
     private val oauthReturnNavigation = OAuthReturnNavigation()
+
+    // Optional Sign in with Chrome: the provider runs in an Auth Tab and only a verified callback
+    // for the flow that launched it is loaded back into the main WebView.
+    private data class PendingBrowserSignIn(
+        val flow: OAuthPopupFlow,
+        val authorizeUrl: String,
+        val serverUrl: String
+    )
+    private var pendingBrowserSignIn: PendingBrowserSignIn? = null
+    private val authTabLauncher = AuthTabIntent.registerActivityResultLauncher(this, ::onBrowserSignInResult)
 
     // Popups created by onCreateWindow that have not yet been destroyed. A window.open('') that
     // never navigates never reaches the popup's shouldOverrideUrlLoading/onPageStarted, so it would
@@ -270,6 +306,12 @@ class MainActivity : ComponentActivity() {
     private val ORPHAN_POPUP_SWEEP_MS = 15 * 1000L
 
     private val serverUrlValidator = ServerUrlValidator()
+
+    private data class PendingHttpAuthPrompt(
+        val handler: HttpAuthHandler,
+        var dialog: AlertDialog? = null,
+        var resolved: Boolean = false
+    )
 
     private var lastBackPressTime: Long = 0
     private var backPressExitStage: Int = 0
@@ -424,8 +466,12 @@ class MainActivity : ComponentActivity() {
             viewModel = viewModel,
             serverUrlValidator = serverUrlValidator,
             onOpenInExternalBrowser = ::openInExternalBrowser,
+            onPrepareCurrentProfileChange = ::prepareForServerSelectionChange,
             onPerformServerProfileSwitch = ::performServerProfileSwitch,
-            onRefreshConfiguredHermes = ::loadServerUrlWithVpnGuard,
+            onRefreshConfiguredHermes = { url ->
+                installHermesWebUiDocumentStartFixes(webView, url)
+                loadServerUrlWithVpnGuard(url)
+            },
             onApproveProxySignIn = proxyAuthNavigation::begin
         )
         foregroundServiceCoordinator = HermesForegroundServiceCoordinator(
@@ -451,7 +497,12 @@ class MainActivity : ComponentActivity() {
         setContent {
             AppContent(
                 onReload = { refreshConfiguredHermes() },
-                onOpenExternal = { openInExternalBrowser(viewModel.uiState.value.currentUrl) },
+                onOpenExternal = {
+                    val state = viewModel.uiState.value
+                    openInExternalBrowser(
+                        if (viewModel.requiresManualRetry()) state.settings.serverUrl else state.currentUrl
+                    )
+                },
                 onSaveSettings = { serverUrl -> saveSettings(serverUrl) },
                 onRequestExit = { finish() }
             )
@@ -466,6 +517,7 @@ class MainActivity : ComponentActivity() {
                 webappGateway.updateSettings(state.webappBackground)
             }
         }
+        publishSettingsShortcut()
 
         val settings = viewModel.uiState.value.settings
         // A launcher open is a plain MAIN intent; deep links and shares ask for something specific
@@ -563,6 +615,10 @@ class MainActivity : ComponentActivity() {
         if (::serverProfileCoordinator.isInitialized) serverProfileCoordinator.dispose()
         if (::webappGateway.isInitialized) webappGateway.dispose(this)
         proxySignInDialog?.dismiss()
+        pendingHttpAuthPrompt?.let { prompt ->
+            cancelHttpAuthPrompt(prompt)
+            prompt.dialog?.dismiss()
+        }
         proxyAuthNavigation.clear()
         stopVpnReconnectWaitLoop()
         runCatching { unregisterReceiver(appUpdateDownloadReceiver) }
@@ -593,6 +649,13 @@ class MainActivity : ComponentActivity() {
      */
     private fun isSettingsDeepLink(data: Uri?): Boolean =
         data != null && data.scheme == "hermes" && data.host == "app" && data.path == "/settings"
+
+    private fun publishSettingsShortcut() {
+        val appContext = applicationContext
+        lifecycleScope.launch(Dispatchers.IO) {
+            AppShortcuts.publish(appContext, LauncherIconManager(appContext).selectedIcon())
+        }
+    }
 
     private fun sessionIdFromDeepLink(data: Uri?): String? =
         if (data != null && data.scheme == "hermes" && data.host == "session") {
@@ -662,8 +725,10 @@ class MainActivity : ComponentActivity() {
 
         // Auto-reload when the retry loop detects the server is back.
         LaunchedEffect(Unit) {
-            viewModel.autoReloadEvent.collect {
-                refreshConfiguredHermes()
+            viewModel.autoReloadEvent.collect { generation ->
+                if (viewModel.isCurrentAutoReload(generation)) {
+                    refreshConfiguredHermes()
+                }
             }
         }
 
@@ -717,7 +782,9 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onOpenExternal = onOpenExternal,
                                 onOpenSettings = { viewModel.openSettings() },
-                                onBack = if (webView.canGoBack()) {{ goBackInMainWebView() }} else null
+                                onBack = if (previousHistoryOffset(webView.copyBackForwardList()) != null) {
+                                    { goBackInMainWebView() }
+                                } else null
                             )
                         }
                         SnackbarHost(hostState = snackbarHostState)
@@ -792,6 +859,17 @@ class MainActivity : ComponentActivity() {
                     },
                     onSetRequireVpnForTailscaleEnabled = { enabled ->
                         viewModel.setRequireVpnForTailscaleEnabled(enabled)
+                    },
+                    hasLegacyHttpAuthCredentials = uiState.hasLegacyHttpAuthCredentials,
+                    onForgetSavedHttpAuth = {
+                        viewModel.forgetSavedHttpAuthCredentials()
+                    },
+                    browserSignInEnabled = uiState.browserSignInEnabled,
+                    onSetBrowserSignInEnabled = { enabled ->
+                        viewModel.setBrowserSignInEnabled(enabled)
+                    },
+                    onCopyBrowserSignInAssetLinks = {
+                        copyBrowserSignInAssetLinks()
                     },
                     onSetVpnLaunchPackageName = { packageName ->
                         viewModel.setVpnLaunchPackageName(packageName)
@@ -983,13 +1061,14 @@ class MainActivity : ComponentActivity() {
                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                     val target = request?.url?.toString() ?: return true
                     val serverUrl = viewModel.uiState.value.settings.serverUrl
+                    if (request.isForMainFrame && blockOutdatedServerCredentials(target)) return true
                     if (request.isForMainFrame &&
                         !proxyAuthNavigation.allows(serverUrl, target) &&
                         !urlPolicy.isAllowed(target) &&
                         activeMainFrameOAuthFlow == null &&
                         parseTrustedOAuthStart(target) == null &&
                         request.isRedirect &&
-                        matchesConfiguredWebUiRoute(view?.url)
+                        isConfiguredRouteOrNoCommittedPage(view?.url)
                     ) {
                         val origin = ProxyAuthNavigation.mainFrameRedirectConsentOrigin(serverUrl, lastMainFrameHopUrl, target)
                         if (origin != null) {
@@ -998,19 +1077,28 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                     val handled = if (request.isForMainFrame && proxyAuthNavigation.allows(serverUrl, target)) {
+                        // Consent-allowed callbacks bypass handleMainWebViewNavigation, but must still
+                        // end the in-app OAuth flow so later external links are externalized.
+                        completeMainFrameOAuthIfCallback(target)
                         false
                     } else {
                         handleMainWebViewNavigation(target)
                     }
                     if (!handled && request.isForMainFrame) {
-                        lastMainFrameHopUrl = target
+                        recordMainFrameHop(target)
+                        recordAllowedOAuthRecoveryUrl(target)
                         restrictMediaPlaybackBeforeNavigation(target)
                     }
                     return handled
                 }
 
+                override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                    return interceptOutdatedServerCredentials(request) ?: super.shouldInterceptRequest(view, request)
+                }
+
                 override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                     super.onPageStarted(view, url, favicon)
+                    if (discardOutdatedCredentialCallback(url)) return
                     serverTypeDocumentGeneration++
                     webappGateway.onDocumentStarted()
                     handleMainWebViewPageStarted(url)
@@ -1018,12 +1106,16 @@ class MainActivity : ComponentActivity() {
 
                 override fun onPageCommitVisible(view: WebView?, url: String?) {
                     super.onPageCommitVisible(view, url)
+                    if (discardOutdatedCredentialCallback(url)) return
+                    clearStaleHistoryAfterNavigation(view, url)
                     applyHermesWebViewCompatibilityFixes(view, url)
                     viewModel.onPageCommitVisible(url)
                 }
 
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
+                    if (discardOutdatedCredentialCallback(url)) return
+                    clearStaleHistoryAfterNavigation(view, url)
                     applyHermesWebViewCompatibilityFixes(view, url)
                     detectLoadedServerType(view)
                     viewModel.onPageFinished(
@@ -1043,6 +1135,7 @@ class MainActivity : ComponentActivity() {
                 override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                     super.doUpdateVisitedHistory(view, url, isReload)
                     val visitedUrl = url?.takeIf { it.isNotBlank() } ?: return
+                    if (discardOutdatedCredentialCallback(visitedUrl)) return
                     // Ignore internal/non-web URLs; persist only trusted Hermes WebUI routes.
                     if (!urlPolicy.isAllowed(visitedUrl)) return
                     if (!matchesConfiguredWebUiRoute(visitedUrl)) return
@@ -1060,33 +1153,9 @@ class MainActivity : ComponentActivity() {
                 ) {
                     super.onReceivedError(view, request, error)
                     if (request?.isForMainFrame != true) return
-                    val failedUrl = request.url?.toString().orEmpty()
-                    if (
-                        isLocalNetworkPermissionError(error) &&
-                            failedUrl.isNotBlank() &&
-                            !hasLocalNetworkPermission()
-                    ) {
-                        requestLocalNetworkPermissionIfNeeded(
-                            url = failedUrl,
-                            onGranted = {
-                                loadServerUrlWithVpnGuard(failedUrl)
-                            }
-                        )
-                        return
-                    }
-                    val offline = isOfflineError(error?.errorCode)
-                    val message = error?.description?.toString() ?: "Failed to load page"
-                    DiagnosticsLogger.record(
-                        this@MainActivity,
-                        "webview_main_frame_error",
-                        mapOf(
-                            "origin" to DiagnosticsLogger.originOnly(request.url?.toString()),
-                            "path" to DiagnosticsLogger.pathOnly(request.url?.toString()),
-                            "error_code" to error?.errorCode?.toString(),
-                            "offline" to offline.toString()
-                        )
+                    handleMainFrameWebViewError(
+                        request.url?.toString().orEmpty(), request.method, error?.description, error?.errorCode
                     )
-                    viewModel.onPageError(message, offline)
                 }
 
                 override fun onReceivedHttpError(
@@ -1114,6 +1183,7 @@ class MainActivity : ComponentActivity() {
 
                 override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: android.net.http.SslError?) {
                     handler?.cancel()
+                    if (discardOutdatedCredentialCallback(error?.url)) return
                     DiagnosticsLogger.record(
                         this@MainActivity,
                         "webview_ssl_error",
@@ -1160,6 +1230,16 @@ class MainActivity : ComponentActivity() {
                         return
                     }
                     request.proceed(cert.privateKey, cert.certChain)
+                }
+
+                override fun onReceivedHttpAuthRequest(
+                    view: WebView?,
+                    handler: HttpAuthHandler?,
+                    host: String?,
+                    realm: String?
+                ) {
+                    if (handler == null) return
+                    showHttpAuthPrompt(handler, host, realm)
                 }
             }
 
@@ -1248,6 +1328,20 @@ class MainActivity : ComponentActivity() {
                 destroyPopup(popup)
                 return true
             }
+
+            override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                return interceptOutdatedServerCredentials(request) ?: super.shouldInterceptRequest(view, request)
+            }
+
+            override fun onReceivedHttpAuthRequest(
+                view: WebView?,
+                handler: HttpAuthHandler?,
+                host: String?,
+                realm: String?
+            ) {
+                if (handler == null) return
+                showHttpAuthPrompt(handler, host, realm)
+            }
         }
     }
 
@@ -1255,6 +1349,7 @@ class MainActivity : ComponentActivity() {
         popup: WebView,
         target: String
     ): Boolean {
+        if (rejectOutdatedPopupNavigation(popup, target)) return true
         if (handleAppSettingsNavigation(target)) {
             destroyPopup(popup)
             return true
@@ -1270,6 +1365,10 @@ class MainActivity : ComponentActivity() {
 
         val flow = parseTrustedOAuthStart(target)
         if (flow != null) {
+            if (launchBrowserSignIn(flow, target)) {
+                destroyPopup(popup)
+                return true
+            }
             // Move popup OAuth flows to the main frame so they are visible and interactive.
             rememberActiveMainFrameOAuth(flow)
             restrictMediaPlaybackBeforeNavigation(target)
@@ -1290,6 +1389,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handlePopupPageStarted(popup: WebView, url: String) {
+        if (rejectOutdatedPopupNavigation(popup, url)) return
         val callbackFlow = activeOAuthFlow.takeIf { activeOAuthPopup === popup }
         if (callbackFlow?.isVerifiedCallbackUrl(url) == true) {
             clearActiveOAuthPopup()
@@ -1300,6 +1400,10 @@ class MainActivity : ComponentActivity() {
 
         val startedFlow = parseTrustedOAuthStart(url)
         if (startedFlow != null) {
+            if (launchBrowserSignIn(startedFlow, url)) {
+                destroyPopup(popup)
+                return
+            }
             // Move popup OAuth flows to the main frame so they are visible and interactive.
             rememberActiveMainFrameOAuth(startedFlow)
             restrictMediaPlaybackBeforeNavigation(url)
@@ -1318,18 +1422,22 @@ class MainActivity : ComponentActivity() {
         destroyPopup(popup)
     }
 
+    private fun rejectOutdatedPopupNavigation(popup: WebView, url: String): Boolean {
+        if (!blockOutdatedServerCredentials(url)) return false
+        if (activeOAuthPopup === popup) clearActiveOAuthPopup()
+        destroyPopup(popup)
+        return true
+    }
+
     private fun handleMainWebViewNavigation(target: String): Boolean {
         if (handleAppSettingsNavigation(target)) return true
 
+        if (completeMainFrameOAuthIfCallback(target)) return false
         val activeTopLevelFlow = activeMainFrameOAuthFlow
-        if (activeTopLevelFlow?.isVerifiedCallbackUrl(target) == true) {
-            oauthReturnNavigation.begin(activeTopLevelFlow)
-            clearActiveMainFrameOAuth()
-            return false
-        }
 
         val startedTopLevelFlow = parseTrustedOAuthStart(target)
         if (startedTopLevelFlow != null) {
+            if (launchBrowserSignIn(startedTopLevelFlow, target)) return true
             rememberActiveMainFrameOAuth(startedTopLevelFlow)
             return false
         }
@@ -1375,15 +1483,21 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun completeMainFrameOAuthIfCallback(url: String): Boolean {
+        val flow = activeMainFrameOAuthFlow ?: return false
+        if (!flow.isVerifiedCallbackUrl(url)) return false
+        oauthReturnNavigation.begin(flow)
+        clearActiveMainFrameOAuth()
+        return true
+    }
+
     private fun handleMainWebViewPageStarted(url: String?) {
-        if (!url.isNullOrBlank()) lastMainFrameHopUrl = url
-        if (!url.isNullOrBlank()) {
-            val activeTopLevelFlow = activeMainFrameOAuthFlow
-            if (activeTopLevelFlow?.isVerifiedCallbackUrl(url) == true) {
-                oauthReturnNavigation.begin(activeTopLevelFlow)
-                clearActiveMainFrameOAuth()
-            } else {
-                parseTrustedOAuthStart(url)?.let { rememberActiveMainFrameOAuth(it) }
+        // The server-switch about:blank placeholder can report its start after the new server's
+        // redirect opened proxy consent; it is not a navigation away, so it must not void that consent.
+        if (url != "about:blank") recordMainFrameHop(url?.takeIf { it.isNotBlank() })
+        if (!url.isNullOrBlank() && !completeMainFrameOAuthIfCallback(url)) {
+            parseTrustedOAuthStart(url)?.let { flow ->
+                if (activeMainFrameOAuthFlow != flow) rememberActiveMainFrameOAuth(flow)
             }
         }
         updateOAuthInFlowHost(url)
@@ -1396,8 +1510,84 @@ class MainActivity : ComponentActivity() {
         HermesMediaPlaybackPolicy.beforeAllowedMainFrameNavigation(webView, target, currentWebTrustPolicy())
     }
 
+    private fun showHttpAuthPrompt(handler: HttpAuthHandler, host: String?, realm: String?) {
+        if (!currentWebTrustPolicy().isTrustedHttpAuthHost(host)) {
+            handler.cancel()
+            return
+        }
+        runOnUiThread {
+            if (isFinishing || isDestroyed) {
+                handler.cancel()
+                return@runOnUiThread
+            }
+            if (pendingHttpAuthPrompt != null) {
+                handler.cancel()
+                return@runOnUiThread
+            }
+
+            val prompt = PendingHttpAuthPrompt(handler)
+            pendingHttpAuthPrompt = prompt
+            val username = EditText(this).apply {
+                hint = "Username"
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                setSingleLine()
+            }
+            val password = EditText(this).apply {
+                hint = "Password"
+                // setSingleLine replaces the password transformation.
+                setSingleLine()
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            }
+            val content = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                val horizontalPadding = (24 * resources.displayMetrics.density).toInt()
+                val verticalPadding = (8 * resources.displayMetrics.density).toInt()
+                setPadding(horizontalPadding, verticalPadding, horizontalPadding, 0)
+                addView(username, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                addView(password, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            }
+
+            val challenge = realm?.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty()
+            val dialog = AlertDialog.Builder(this)
+                .setTitle("Sign in to $host")
+                .setMessage("This server requires a username and password$challenge.")
+                .setView(content)
+                .setPositiveButton("Sign in", null)
+                .setNegativeButton("Cancel") { _, _ -> cancelHttpAuthPrompt(prompt) }
+                .setOnCancelListener { cancelHttpAuthPrompt(prompt) }
+                .create()
+            prompt.dialog = dialog
+            dialog.setOnShowListener {
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                    val enteredUsername = username.text.toString()
+                    val enteredPassword = password.text.toString()
+                    proceedHttpAuthPrompt(prompt, enteredUsername, enteredPassword)
+                    dialog.dismiss()
+                }
+                username.requestFocus()
+                dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
+            }
+            dialog.show()
+        }
+    }
+
+    private fun cancelHttpAuthPrompt(prompt: PendingHttpAuthPrompt) {
+        if (prompt.resolved) return
+        prompt.resolved = true
+        if (pendingHttpAuthPrompt === prompt) pendingHttpAuthPrompt = null
+        prompt.handler.cancel()
+    }
+
+    private fun proceedHttpAuthPrompt(prompt: PendingHttpAuthPrompt, username: String, password: String) {
+        if (prompt.resolved) return
+        prompt.resolved = true
+        if (pendingHttpAuthPrompt === prompt) pendingHttpAuthPrompt = null
+        prompt.handler.proceed(username, password)
+    }
+
     private fun confirmProxySignInRedirect(serverUrl: String, origin: String, target: String) {
         if (proxySignInDialog?.isShowing == true) return
+        val navigationGeneration = mainFrameNavigationGeneration
         DiagnosticsLogger.record(this, "proxy_sign_in_redirect", mapOf(
             "origin" to DiagnosticsLogger.originOnly(serverUrl),
             "login_origin" to origin
@@ -1411,8 +1601,11 @@ class MainActivity : ComponentActivity() {
             )
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Continue") { _, _ ->
+                // An intercepted initial redirect can leave WebView.url null even without a new navigation.
                 val stillConfigured = viewModel.uiState.value.settings.serverUrl == serverUrl &&
-                    matchesConfiguredWebUiRoute(webView.url)
+                    mainFrameNavigationGeneration == navigationGeneration &&
+                    matchesConfiguredWebUiRoute(lastMainFrameHopUrl) &&
+                    ProxyAuthNavigation.mainFrameRedirectConsentOrigin(serverUrl, lastMainFrameHopUrl, target) == origin
                 DiagnosticsLogger.record(this, "proxy_sign_in_approval", mapOf(
                     "origin" to DiagnosticsLogger.originOnly(serverUrl),
                     "current_origin" to DiagnosticsLogger.originOnly(webView.url),
@@ -1467,10 +1660,11 @@ class MainActivity : ComponentActivity() {
     private fun requestLocalNetworkPermissionIfNeeded(
         url: String,
         onGranted: () -> Unit,
-        onDenied: (() -> Unit)? = null
+        onDenied: (() -> Unit)? = null,
+        confirmedPermissionError: Boolean = false
     ) {
         val decision = LocalNetworkPolicy.preflightDecision(
-            isLocalHost = shouldRequestLocalNetworkPermission(url),
+            isLocalHost = confirmedPermissionError || shouldRequestLocalNetworkPermission(url),
             hasPermission = hasLocalNetworkPermission()
         )
         if (decision == LocalNetworkPolicy.PreflightDecision.PROCEED) {
@@ -1478,8 +1672,18 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        pendingLocalNetworkPermissionAction = onGranted
-        pendingLocalNetworkPermissionDeniedAction = onDenied
+        val selectionGeneration = serverSelectionGeneration
+        fun ifSelectionStillCurrent(action: () -> Unit) {
+            if (serverSelectionGeneration == selectionGeneration) {
+                action()
+            } else {
+                DiagnosticsLogger.record(this, "server_navigation_discarded", mapOf("reason" to "server_changed"))
+            }
+        }
+        pendingLocalNetworkPermissionAction = { ifSelectionStillCurrent(onGranted) }
+        pendingLocalNetworkPermissionDeniedAction = onDenied?.let { action ->
+            { ifSelectionStillCurrent(action) }
+        }
         localNetworkPermissionLauncher.launch("android.permission.ACCESS_LOCAL_NETWORK")
     }
 
@@ -1496,11 +1700,81 @@ class MainActivity : ComponentActivity() {
         return LocalNetworkPolicy.isLikelyLocalNetworkHost(host)
     }
 
-    private fun isLocalNetworkPermissionError(error: WebResourceError?): Boolean {
-        return error?.description?.contains(
-            "ERR_LOCAL_NETWORK_PERMISSION_MISSING",
-            ignoreCase = true
-        ) == true
+    private fun handleMainFrameWebViewError(
+        failedUrl: String,
+        method: String?,
+        description: CharSequence?,
+        errorCode: Int?
+    ) {
+        if (discardOutdatedCredentialCallback(failedUrl)) return
+        if (recoverFromLocalNetworkPermissionError(failedUrl, description, method)) return
+        val offline = isOfflineError(errorCode)
+        val localNetworkPermissionError =
+            description?.contains("ERR_LOCAL_NETWORK_PERMISSION_MISSING", ignoreCase = true) == true
+        val message = if (!method.equals("GET", ignoreCase = true) && localNetworkPermissionError) {
+            "If prompted, allow local network access, then retry your action."
+        } else {
+            description?.toString() ?: "Failed to load page"
+        }
+        DiagnosticsLogger.record(
+            this,
+            "webview_main_frame_error",
+            mapOf(
+                "origin" to DiagnosticsLogger.originOnly(failedUrl),
+                "path" to DiagnosticsLogger.pathOnly(failedUrl),
+                "error_code" to errorCode?.toString(),
+                "offline" to offline.toString()
+            )
+        )
+        viewModel.onPageError(message, offline, retryAutomatically = !localNetworkPermissionError)
+    }
+
+    private fun recoverFromLocalNetworkPermissionError(
+        failedUrl: String,
+        description: CharSequence?,
+        method: String?
+    ): Boolean {
+        if (description?.contains("ERR_LOCAL_NETWORK_PERMISSION_MISSING", ignoreCase = true) != true ||
+            failedUrl.isBlank() || hasLocalNetworkPermission()
+        ) return false
+        if (discardOutdatedCredentialCallback(failedUrl)) return true
+        if (!method.equals("GET", ignoreCase = true)) {
+            val navigationGeneration = mainFrameNavigationGeneration
+            requestLocalNetworkPermissionIfNeeded(
+                failedUrl,
+                onGranted = {
+                    if (navigationGeneration == mainFrameNavigationGeneration) {
+                        Toast.makeText(this, "Retry your action after allowing local network access.", Toast.LENGTH_LONG).show()
+                    }
+                },
+                confirmedPermissionError = true
+            )
+            DiagnosticsLogger.record(this, "local_network_recovery_blocked", mapOf("reason" to "manual_retry_required"))
+            return false
+        }
+        val fence = serverSelectionFence
+        val failedOrigin = UrlOrigins.pageOrigin(failedUrl)
+        val oauthGeneration = oauthRecoveryNavigationGeneration.takeIf {
+            isCurrentOAuthRecovery(failedUrl, it)
+        }
+        if (activeMainFrameOAuthFlow != null && oauthGeneration == null) {
+            DiagnosticsLogger.record(this, "local_network_recovery_blocked", mapOf("reason" to "unproven_oauth_navigation"))
+            return false
+        }
+        if (failedOrigin != null && failedOrigin in fence?.previousOrigins.orEmpty() &&
+            failedOrigin.startsWith("http://") &&
+            fence?.selectedUrl?.let(UrlOrigins::pageOrigin)?.startsWith("https://") == true &&
+            oauthGeneration == null
+        ) {
+            DiagnosticsLogger.record(this, "local_network_recovery_blocked", mapOf("reason" to "https_downgrade"))
+            return false
+        }
+        requestLocalNetworkPermissionIfNeeded(
+            url = failedUrl,
+            onGranted = { loadServerUrlWithVpnGuard(failedUrl, oauthGeneration) },
+            confirmedPermissionError = true
+        )
+        return true
     }
 
     private fun installHermesNotificationWebMessageBridge(view: WebView) {
@@ -1945,12 +2219,87 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun currentRouteRecoveryUrl(): String {
-        val lastUrl = settingsRepository.getLastLoadedUrl().orEmpty()
-        val settings = viewModel.uiState.value.settings
-        if (lastUrl.isBlank() || !UrlOrigins.hasSameOrigin(lastUrl, settings.serverUrl)) return ""
+        return SelectedServerNavigation.routeRecoveryUrl(
+            settingsRepository.getLastLoadedUrl(),
+            viewModel.uiState.value.settings.serverUrl
+        )
+    }
 
-        val normalizedLastPath = UrlOrigins.normalizedPath(lastUrl)
-        return if (normalizedLastPath.isBlank()) "" else lastUrl
+    private fun prepareForServerSelectionChange(previousServerUrl: String, selectedServerUrl: String) {
+        serverSelectionGeneration++
+        clearActiveMainFrameOAuth()
+        oauthReturnNavigation.clear()
+        val previousFence = serverSelectionFence
+        serverSelectionFence = ServerSelectionFence(
+            selectedUrl = selectedServerUrl,
+            previousHosts = previousFence?.previousHosts.orEmpty() + listOfNotNull(UrlOrigins.hostFrom(previousServerUrl)),
+            previousOrigins = previousFence?.previousOrigins.orEmpty() + listOfNotNull(UrlOrigins.pageOrigin(previousServerUrl))
+        )
+        pendingVpnGuardUrl = null
+        pendingVpnOAuthRecoveryGeneration = null
+        stopVpnReconnectWaitLoop()
+
+        val origin = UrlOrigins.pageOrigin(previousServerUrl)
+        if (origin != null && UrlOrigins.hasSameOrigin(webView.url, previousServerUrl)) {
+            webView.evaluateJavascript(
+                HermesWebUiScripts.buildOriginGuardedRuntimeScript(
+                    origin,
+                    "window.dispatchEvent(new Event('hermes-android-reset-route-recovery'));"
+                ),
+                null
+            )
+        }
+        val history = webView.copyBackForwardList()
+        val hasStaleCredentials = (0 until history.size).any { index ->
+            SelectedServerNavigation.hasOutdatedServerCredentials(
+                history.getItemAtIndex(index)?.url, previousServerUrl, selectedServerUrl
+            )
+        }
+        if (hasStaleCredentials) {
+            webView.stopLoading()
+            loadInMainWebView("about:blank")
+            webView.clearHistory()
+            clearHistoryOnNextConfiguredPage = true
+        }
+    }
+
+    private fun hasOutdatedServerCredentials(url: String): Boolean {
+        val fence = serverSelectionFence
+        val selectedUrl = fence?.selectedUrl ?: viewModel.uiState.value.settings.serverUrl
+        val host = UrlOrigins.hostFrom(url) ?: return false
+        val isServerHost = host == UrlOrigins.hostFrom(selectedUrl) || host in fence?.previousHosts.orEmpty()
+        return isServerHost && !UrlOrigins.hasCompatibleUserInfo(url, selectedUrl)
+    }
+
+    private fun blockOutdatedServerCredentials(url: String): Boolean {
+        if (!hasOutdatedServerCredentials(url)) return false
+        DiagnosticsLogger.record(this, "stale_credential_navigation_blocked", mapOf("reason" to "server_credentials_changed"))
+        return true
+    }
+
+    private fun interceptOutdatedServerCredentials(request: WebResourceRequest?): WebResourceResponse? {
+        if (request?.isForMainFrame != true || !blockOutdatedServerCredentials(request.url.toString())) return null
+        return WebResourceResponse(
+            "text/plain", "utf-8", 403, "Navigation blocked",
+            mapOf("Cache-Control" to "no-store"),
+            "Navigation blocked because the saved server sign-in changed. Open Application Settings."
+                .byteInputStream()
+        )
+    }
+
+    private fun discardOutdatedCredentialCallback(url: String?): Boolean {
+        if (url.isNullOrBlank() || !hasOutdatedServerCredentials(url)) return false
+        DiagnosticsLogger.record(this, "server_navigation_discarded", mapOf("reason" to "server_credentials_changed"))
+        return true
+    }
+
+    private fun clearStaleHistoryAfterNavigation(view: WebView?, url: String?) {
+        if (!clearHistoryOnNextConfiguredPage || view == null || url.isNullOrBlank() ||
+            view.url != url || !matchesConfiguredWebUiRoute(url) ||
+            !UrlOrigins.hasCompatibleUserInfo(url, viewModel.uiState.value.settings.serverUrl)
+        ) return
+        view.clearHistory()
+        clearHistoryOnNextConfiguredPage = false
     }
 
     private fun buildHermesWebUiNotificationBridgeScript(): String {
@@ -1962,6 +2311,12 @@ class MainActivity : ComponentActivity() {
 
     private fun matchesConfiguredWebUiRoute(url: String?): Boolean {
         return currentWebTrustPolicy().isConfiguredWebUiRoute(url)
+    }
+
+    // A server switch commits about:blank before loading the new server, so its first redirect
+    // can arrive before any server page commits; the exact-origin hop check still attributes it.
+    private fun isConfiguredRouteOrNoCommittedPage(url: String?): Boolean {
+        return url == null || url == "about:blank" || matchesConfiguredWebUiRoute(url)
     }
 
     private fun detectLoadedServerType(view: WebView?) {
@@ -2007,8 +2362,31 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private fun loadInMainWebView(url: String) {
+    private fun recordMainFrameHop(url: String?) {
+        viewModel.onNavigationRequested()
         lastMainFrameHopUrl = url
+        mainFrameNavigationGeneration++
+    }
+
+    private fun recordAllowedOAuthRecoveryUrl(url: String) {
+        oauthRecoveryNavigationGeneration++
+        allowedOAuthRecoveryUrl = url.takeIf {
+            activeMainFrameOAuthFlow != null && System.currentTimeMillis() <= oauthFlowTimeoutMs &&
+                isHttpOrHttpsUrl(it)
+        }
+        cancelInvalidPendingOAuthVpnRecovery()
+    }
+
+    private fun isCurrentOAuthRecovery(url: String, generation: Long): Boolean {
+        return generation == oauthRecoveryNavigationGeneration &&
+            activeMainFrameOAuthFlow != null && System.currentTimeMillis() <= oauthFlowTimeoutMs &&
+            url == allowedOAuthRecoveryUrl
+    }
+
+    private fun loadInMainWebView(url: String) {
+        if (blockOutdatedServerCredentials(url)) return
+        recordMainFrameHop(url)
+        recordAllowedOAuthRecoveryUrl(url)
         webView.loadUrl(url)
     }
 
@@ -2025,9 +2403,19 @@ class MainActivity : ComponentActivity() {
                 viewModel.uiState.value.isSettingsVisible
             ) return@evaluateJavascript
             if (result == "true") {
-                // The official workspace owns its tabs/hash routes. Never back into sign-in.
-                backPressExitStage = 0
-                viewModel.openSettings()
+                // The official workspace owns its tabs/hash routes. Never back into sign-in or
+                // out of the mounted document (Issue #194).
+                val history = webView.copyBackForwardList()
+                val offset = SelectedServerNavigation.sameDocumentBackOffset(
+                    history = List(history.size) { history.getItemAtIndex(it)?.url },
+                    currentIndex = history.currentIndex,
+                    selectedServerUrl = serverUrl
+                )
+                if (offset != null && goBackInMainWebView(offset)) {
+                    backPressExitStage = 0
+                } else {
+                    handleExitBackPress(onRequestExit)
+                }
             } else {
                 handleWebUiBackNavigation(onRequestExit)
             }
@@ -2035,37 +2423,51 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleWebUiBackNavigation(onRequestExit: () -> Unit) {
-        if (webView.canGoBack()) {
+        if (goBackInMainWebView()) {
             backPressExitStage = 0
-            goBackInMainWebView()
             return
         }
+        handleExitBackPress(onRequestExit)
+    }
+
+    private fun handleExitBackPress(onRequestExit: () -> Unit) {
         val currentTime = System.currentTimeMillis()
         if (currentTime - lastBackPressTime >= BACK_PRESS_TIMEOUT_MS) backPressExitStage = 0
-        when (backPressExitStage) {
-            0 -> {
-                backPressExitStage = 1
-                lastBackPressTime = currentTime
-                Toast.makeText(this, "Press back again for Application Settings", Toast.LENGTH_SHORT).show()
-            }
-            1 -> {
-                backPressExitStage = 2
-                lastBackPressTime = currentTime
-                viewModel.openSettings()
-                Toast.makeText(this, "Press back again to exit", Toast.LENGTH_SHORT).show()
-            }
-            else -> onRequestExit()
+        if (backPressExitStage == 0) {
+            backPressExitStage = 1
+            lastBackPressTime = currentTime
+            Toast.makeText(this, R.string.back_press_again_to_exit, Toast.LENGTH_SHORT).show()
+        } else {
+            backPressExitStage = 0
+            onRequestExit()
         }
     }
 
-    private fun goBackInMainWebView() {
+    private fun previousHistoryOffset(history: WebBackForwardList): Int? {
+        return SelectedServerNavigation.previousHistoryOffset(
+            history = List(history.size) { history.getItemAtIndex(it)?.url },
+            currentIndex = history.currentIndex,
+            selectedServerUrl = viewModel.uiState.value.settings.serverUrl
+        )
+    }
+
+    private fun goBackInMainWebView(): Boolean = goBackInMainWebView(requiredOffset = null)
+
+    private fun goBackInMainWebView(requiredOffset: Int?): Boolean {
         // History navigation skips shouldOverrideUrlLoading, so record the entry being restored.
         val history = webView.copyBackForwardList()
-        lastMainFrameHopUrl = history.getItemAtIndex(history.currentIndex - 1)?.url
-        webView.goBack()
+        val offset = previousHistoryOffset(history) ?: return false
+        if (requiredOffset != null && offset != requiredOffset) return false
+        allowedOAuthRecoveryUrl = null
+        oauthRecoveryNavigationGeneration++
+        cancelInvalidPendingOAuthVpnRecovery()
+        recordMainFrameHop(history.getItemAtIndex(history.currentIndex + offset)?.url)
+        webView.goBackOrForward(offset)
+        return true
     }
 
     private fun handleNewWindowUrl(url: String) {
+        if (blockOutdatedServerCredentials(url)) return
         if (matchesConfiguredDashboardRoute(url)) {
             openDashboardInCustomTab(url)
             return
@@ -2087,10 +2489,132 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun parseTrustedOAuthStart(url: String): OAuthPopupFlow? {
-        val settings = viewModel.uiState.value.settings
-        return OAuthPopupFlow.parseAuthorizationStart(url)
-            ?.takeIf { it.redirectsToOrigin(settings.serverUrl) }
+        val serverUrl = viewModel.uiState.value.settings.serverUrl
+        val flow = OAuthPopupFlow.parseAuthorizationStart(url) ?: return null
+        if (flow.redirectsToOrigin(serverUrl)) return flow
+        return flow.takeIf {
+            proxyAuthNavigation.allowsGatewayOAuthCallback(serverUrl, lastMainFrameHopUrl, it.redirectUri)
+        }
     }
+
+    private fun isBrowserSignInStillTrusted(pending: PendingBrowserSignIn): Boolean {
+        val serverUrl = viewModel.uiState.value.settings.serverUrl
+        return serverUrl == pending.serverUrl &&
+            (pending.flow.redirectsToOrigin(serverUrl) ||
+                proxyAuthNavigation.isActiveLoginOrigin(serverUrl, pending.flow.redirectUri))
+    }
+
+    /** Opens a trusted OAuth start in a Chrome Auth Tab when the user opted in and Chrome supports it. */
+    private fun launchBrowserSignIn(flow: OAuthPopupFlow, authorizeUrl: String): Boolean {
+        if (!settingsRepository.isBrowserSignInEnabled()) return false
+        // Nested authorizations inside an in-app flow, including after "Continue in app", stay in the app.
+        if (activeMainFrameOAuthFlow != null) return false
+        val callback = BrowserSignIn.authTabCallback(flow.redirectUri) ?: return false
+        val browserPackage = CustomTabsClient.getPackageName(this, null) ?: return false
+        // An unsupported browser would silently open a plain Custom Tab that can never return the callback.
+        if (!CustomTabsClient.isAuthTabSupported(this, browserPackage)) return false
+        val authTab = AuthTabIntent.Builder().build()
+        authTab.intent.setPackage(browserPackage)
+        pendingBrowserSignIn = PendingBrowserSignIn(flow, authorizeUrl, viewModel.uiState.value.settings.serverUrl)
+        return try {
+            authTab.launch(authTabLauncher, authorizeUrl.toUri(), callback.host, callback.path)
+            DiagnosticsLogger.record(this, "browser_sign_in", mapOf(
+                "event" to "launched",
+                "callback_origin" to DiagnosticsLogger.originOnly(flow.redirectUri)
+            ))
+            true
+        } catch (_: ActivityNotFoundException) {
+            pendingBrowserSignIn = null
+            false
+        }
+    }
+
+    private fun onBrowserSignInResult(result: AuthTabIntent.AuthResult) {
+        val pending = pendingBrowserSignIn
+        if (pending == null) {
+            // The activity was recreated while Chrome was open; the in-memory flow and consent are gone.
+            if (result.resultCode == AuthTabIntent.RESULT_OK) {
+                Toast.makeText(this, "Sign-in was interrupted. Please try again.", Toast.LENGTH_LONG).show()
+            }
+            return
+        }
+        pendingBrowserSignIn = null
+        val trusted = isBrowserSignInStillTrusted(pending)
+        DiagnosticsLogger.record(this, "browser_sign_in", mapOf(
+            "event" to "result",
+            "code" to result.resultCode.toString(),
+            "trusted" to trusted.toString()
+        ))
+        when (result.resultCode) {
+            AuthTabIntent.RESULT_OK -> {
+                val callbackUrl = result.resultUri?.toString()
+                if (trusted && callbackUrl != null && pending.flow.isVerifiedCallbackUrl(callbackUrl)) {
+                    loadOAuthCallbackInMainWebView(pending.flow, callbackUrl)
+                } else {
+                    Toast.makeText(this, "Sign-in could not be completed. Please try again.", Toast.LENGTH_LONG).show()
+                }
+            }
+            AuthTabIntent.RESULT_VERIFICATION_FAILED, AuthTabIntent.RESULT_VERIFICATION_TIMED_OUT -> {
+                if (trusted) {
+                    showBrowserSignInVerificationDialog(pending)
+                } else {
+                    Toast.makeText(this, "Server changed. Please retry sign-in.", Toast.LENGTH_LONG).show()
+                }
+            }
+            else -> Unit
+        }
+    }
+
+    private fun showBrowserSignInVerificationDialog(pending: PendingBrowserSignIn) {
+        val host = UrlOrigins.hostFrom(pending.flow.redirectUri) ?: "the sign-in site"
+        AlertDialog.Builder(this)
+            .setTitle("Chrome couldn't confirm this app")
+            .setMessage(
+                "Chrome returns a sign-in to Hermes only when $host publishes this app's " +
+                    "/.well-known/assetlinks.json file. Copy it from Settings > Connection > " +
+                    "Sign in with Chrome, or continue signing in inside the app."
+            )
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Continue in app") { _, _ ->
+                if (!isBrowserSignInStillTrusted(pending)) {
+                    Toast.makeText(this, "Server changed. Please retry sign-in.", Toast.LENGTH_LONG).show()
+                    return@setPositiveButton
+                }
+                rememberActiveMainFrameOAuth(pending.flow)
+                restrictMediaPlaybackBeforeNavigation(pending.authorizeUrl)
+                loadInMainWebView(pending.authorizeUrl)
+            }
+            .show()
+    }
+
+    private fun copyBrowserSignInAssetLinks() {
+        val fingerprints = signingCertificateFingerprints()
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        if (fingerprints.isEmpty() || clipboard == null) {
+            Toast.makeText(this, "Couldn't prepare assetlinks.json on this device.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        clipboard.setPrimaryClip(
+            ClipData.newPlainText("Hermes assetlinks.json", BrowserSignIn.assetLinksJson(packageName, fingerprints))
+        )
+        Toast.makeText(this, "Copied assetlinks.json for $packageName.", Toast.LENGTH_SHORT).show()
+    }
+
+    /** SHA-256 fingerprints of the certificates this installed build is signed with. */
+    @android.annotation.SuppressLint("PackageManagerGetSignatures")
+    private fun signingCertificateFingerprints(): List<String> = runCatching {
+        val certificates = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            @Suppress("DEPRECATION")
+            packageManager.getPackageInfo(packageName, PackageManager.GET_SIGNING_CERTIFICATES)
+                .signingInfo?.apkContentsSigners
+        } else {
+            @Suppress("DEPRECATION")
+            packageManager.getPackageInfo(packageName, PackageManager.GET_SIGNATURES).signatures
+        }
+        certificates.orEmpty().map {
+            BrowserSignIn.sha256Fingerprint(MessageDigest.getInstance("SHA-256").digest(it.toByteArray()))
+        }.distinct()
+    }.getOrDefault(emptyList())
 
     private fun isHttpOrHttpsUrl(url: String): Boolean {
         val scheme = runCatching { url.toUri().scheme }.getOrNull()
@@ -2119,6 +2643,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         val persist = {
+            prepareForServerSelectionChange(viewModel.uiState.value.settings.serverUrl, serverUrl)
             viewModel.saveAppUrls(serverUrl, dashboardUrl)
             if (profileName != null && serverType != null) {
                 viewModel.addServerProfile(profileName, serverUrl, serverType)
@@ -2160,6 +2685,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun preflightConfiguredStartupServer(serverUrl: String) {
+        val selectionGeneration = serverSelectionGeneration
         val lastLoadedUrl = settingsRepository.getLastLoadedUrl()
         // A cold-start session deep link (#170) shares the notification-tap override slot, so
         // startupUrl still requires a trusted configured WebUI route before honoring it.
@@ -2184,7 +2710,11 @@ class MainActivity : ComponentActivity() {
         serverProfileCoordinator.preflightConfiguredStartupServer(
             serverUrl = serverUrl,
             startUrl = startUrl,
-            onContinueToWebView = { targetUrl ->
+            onContinueToWebView = continueToWebView@{ targetUrl ->
+                if (selectionGeneration != serverSelectionGeneration) {
+                    DiagnosticsLogger.record(this, "server_navigation_discarded", mapOf("reason" to "server_changed"))
+                    return@continueToWebView
+                }
                 requestLocalNetworkPermissionIfNeeded(
                     url = targetUrl,
                     onGranted = {
@@ -2269,6 +2799,7 @@ class MainActivity : ComponentActivity() {
             "server_switch_confirmed",
             mapOf("origin" to DiagnosticsLogger.originOnly(profile.url), "profile_id" to profile.id)
         )
+        prepareForServerSelectionChange(viewModel.uiState.value.settings.serverUrl, profile.url)
         clearWebViewStateForServerSwitch()
 
         viewModel.switchServerProfile(profile.id)
@@ -2422,9 +2953,15 @@ class MainActivity : ComponentActivity() {
         return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
-    private fun loadServerUrlWithVpnGuard(url: String) {
+    private fun loadServerUrlWithVpnGuard(url: String, oauthRecoveryGeneration: Long? = null) {
+        if (oauthRecoveryGeneration != null && !isCurrentOAuthRecovery(url, oauthRecoveryGeneration)) {
+            DiagnosticsLogger.record(this, "local_network_recovery_blocked", mapOf("reason" to "oauth_flow_changed"))
+            return
+        }
+        viewModel.onNavigationRequested()
         if (!shouldRequireVpnForServerUrl(url) || isVpnTransportActive()) {
             pendingVpnGuardUrl = null
+            pendingVpnOAuthRecoveryGeneration = null
             stopVpnReconnectWaitLoop()
             restrictMediaPlaybackBeforeNavigation(url)
             loadInMainWebView(url)
@@ -2433,7 +2970,8 @@ class MainActivity : ComponentActivity() {
 
         queueVpnGuardedLoad(
             serverUrl = url,
-            details = "Trying to connect Tailscale automatically. Hermes retries every second while waiting for VPN."
+            details = "Trying to connect Tailscale automatically. Hermes retries every second while waiting for VPN.",
+            oauthRecoveryGeneration = oauthRecoveryGeneration
         )
     }
 
@@ -2448,11 +2986,15 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshConfiguredHermes(closeSettings: Boolean = false) {
         val state = viewModel.uiState.value
-        val targetUrl = SelectedServerNavigation.reconnectUrl(
-            currentUrl = state.currentUrl,
-            selectedServerUrl = state.settings.serverUrl,
-            trustPolicy = currentWebTrustPolicy()
-        )
+        val targetUrl = if (viewModel.requiresManualRetry()) {
+            state.settings.serverUrl
+        } else {
+            SelectedServerNavigation.reconnectUrl(
+                currentUrl = state.currentUrl,
+                selectedServerUrl = state.settings.serverUrl,
+                trustPolicy = currentWebTrustPolicy()
+            )
+        }
         if (targetUrl.isBlank()) {
             viewModel.openSettings()
             return
@@ -2524,7 +3066,9 @@ class MainActivity : ComponentActivity() {
         tailscaleLaunchFallbackJob?.cancel()
         tailscaleLaunchFallbackJob = lifecycleScope.launch {
             delay(TailscaleAutoConnectFallbackMs)
-            if (pendingVpnGuardUrl != serverUrl || isVpnTransportActive()) return@launch
+            if (pendingVpnGuardUrl != serverUrl || cancelInvalidPendingOAuthVpnRecovery() ||
+                isVpnTransportActive()
+            ) return@launch
 
             val launchedVpnApp = launchVpnApp(TailscaleAndroidPackage) ||
                 launchVpnApp(preferredVpnPackage)
@@ -2580,6 +3124,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun rememberActiveMainFrameOAuth(flow: OAuthPopupFlow) {
+        if (activeMainFrameOAuthFlow != flow) {
+            allowedOAuthRecoveryUrl = null
+            oauthRecoveryNavigationGeneration++
+            cancelInvalidPendingOAuthVpnRecovery()
+        }
         activeMainFrameOAuthFlow = flow
         setOAuthThirdPartyCookiesEnabled(true)
         refreshActiveOAuthTimeout()
@@ -2587,6 +3136,9 @@ class MainActivity : ComponentActivity() {
 
     private fun clearActiveMainFrameOAuth() {
         activeMainFrameOAuthFlow = null
+        allowedOAuthRecoveryUrl = null
+        oauthRecoveryNavigationGeneration++
+        cancelInvalidPendingOAuthVpnRecovery()
         viewModel.setOAuthInFlowHost(null)
         if (activeOAuthPopup == null) {
             oauthFlowTimeoutMs = 0L
@@ -2655,8 +3207,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun queueVpnGuardedLoad(serverUrl: String, details: String) {
+    private fun queueVpnGuardedLoad(
+        serverUrl: String,
+        details: String,
+        oauthRecoveryGeneration: Long? = null
+    ) {
         pendingVpnGuardUrl = serverUrl
+        pendingVpnOAuthRecoveryGeneration = oauthRecoveryGeneration
         maybeLaunchVpnForServer(serverUrl, showPrompt = true)
         startVpnReconnectWaitLoopIfNeeded()
         viewModel.openSettingsWithServerValidation(
@@ -2667,9 +3224,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startVpnReconnectWaitLoopIfNeeded() {
+        if (cancelInvalidPendingOAuthVpnRecovery()) return
         val targetUrl = pendingVpnGuardUrl ?: return
         if (!shouldRequireVpnForServerUrl(targetUrl)) {
             pendingVpnGuardUrl = null
+            pendingVpnOAuthRecoveryGeneration = null
             return
         }
         if (vpnReconnectWaitJob?.isActive == true) return
@@ -2677,20 +3236,26 @@ class MainActivity : ComponentActivity() {
             while (isActive) {
                 val probeStartedAt = SystemClock.elapsedRealtime()
                 val pendingUrl = pendingVpnGuardUrl ?: return@launch
+                val oauthGeneration = pendingVpnOAuthRecoveryGeneration
+                val selectionGeneration = serverSelectionGeneration
+                if (cancelInvalidPendingOAuthVpnRecovery()) return@launch
                 if (!shouldRequireVpnForServerUrl(pendingUrl)) {
                     pendingVpnGuardUrl = null
+                    pendingVpnOAuthRecoveryGeneration = null
                     return@launch
                 }
-                if (
-                    isVpnTransportActive() &&
-                    HermesApiClient.isServerReachable(
-                        baseUrl = pendingUrl,
-                        timeoutMs = VpnReconnectPollIntervalMs.toInt() - 100
-                    )
+                val reachable = vpnReconnectProbe(pendingUrl)
+                if (selectionGeneration != serverSelectionGeneration || pendingVpnGuardUrl != pendingUrl ||
+                    pendingVpnOAuthRecoveryGeneration != oauthGeneration
                 ) {
+                    continue
+                }
+                if (cancelInvalidPendingOAuthVpnRecovery()) return@launch
+                if (reachable) {
                     pendingVpnGuardUrl = null
+                    pendingVpnOAuthRecoveryGeneration = null
                     viewModel.closeSettings()
-                    loadServerUrlWithVpnGuard(pendingUrl)
+                    loadServerUrlWithVpnGuard(pendingUrl, oauthGeneration)
                     notifyVpnRecoveryReadyIfBackgrounded()
                     return@launch
                 }
@@ -2698,6 +3263,17 @@ class MainActivity : ComponentActivity() {
                 delay((VpnReconnectPollIntervalMs - elapsedMs).coerceAtLeast(0L))
             }
         }
+    }
+
+    private fun cancelInvalidPendingOAuthVpnRecovery(): Boolean {
+        val generation = pendingVpnOAuthRecoveryGeneration ?: return false
+        val url = pendingVpnGuardUrl
+        if (url != null && isCurrentOAuthRecovery(url, generation)) return false
+        pendingVpnGuardUrl = null
+        pendingVpnOAuthRecoveryGeneration = null
+        stopVpnReconnectWaitLoop()
+        DiagnosticsLogger.record(this, "local_network_recovery_blocked", mapOf("reason" to "oauth_flow_changed"))
+        return true
     }
 
     private fun stopVpnReconnectWaitLoop() {

@@ -273,7 +273,7 @@ on Android.
 
 **Now supporting the official Hermes Agent WebApp:** bring the browser-hosted
 Desktop workspace to Android with native sharing, file pickers, notifications,
-and Back-to-Settings navigation. No separate Hermes WebUI installation required.
+and normal Android Back navigation. No separate Hermes WebUI installation required.
 See [Official Hermes Webapp](#official-hermes-webapp) for setup and current limits.
 
 - Your Hermes workspace, on Android
@@ -328,10 +328,16 @@ secure-context features are unavailable on ordinary LAN HTTP. Do not copy
 one-use sign-in links or tokens into saved server profiles.
 
 Android recognizes the official workspace's `__HERMES_UI_SURFACE__` marker.
-**Android Back opens Application Settings** from that workspace, even when
-its tab/hash navigation has populated browser history; Back from Settings
-returns to the same mounted workspace without reloading it. WebUI retains its
-existing history-first Back behavior and sidebar Application Settings entry.
+**Android Back** steps through the workspace's in-page (hash) navigation
+without reloading it or returning to the sign-in page, then asks you to press
+Back again to exit. WebUI uses its browser history first, then the same
+press-again-to-exit confirmation. Back never opens Application Settings.
+
+Open **Application Settings** even when the page fails to load from the
+launcher icon's long-press **Settings** shortcut or the **Edit server URL**
+button on the connection error screen. While Hermes is in the background with
+**Background activity notification** enabled, its ongoing notification also has
+a **Settings** action. In WebUI, the sidebar entry still works too.
 
 Both frontends use the native upload picker, trusted HTTP(S) downloads,
 microphone permission handling, system-bar insets, pinch zoom, and Android
@@ -499,11 +505,15 @@ If a change belongs to Hermes everywhere, it belongs in WebUI first.
 - Clarify-specific initial-autofocus handling that keeps multiple-choice options visible without blocking editable WebUI dialogs or later validation focus
 - System-bar safe inset handling so Hermes content does not sit under Android status and navigation bars
 - Forced WebView darkening disabled so Hermes controls its own visual presentation
-- Local network permission handling for Android 16+ so LAN-hosted Hermes WebUI instances can load inside the WebView
+- Local network permission handling for Android 16+ so LAN-hosted Hermes WebUI instances can load inside the WebView. A confirmed permission error can prompt for access even when the host was not recognized in advance. A failed form submission prompts without automatically replaying the form; Retry and Open in browser return to the configured server so the action can be started again. An older sign-in page reached with Back may also require a manual retry.
 - Microphone compatibility handling so trusted Hermes pages can use Android-supported capture paths
 - Spoken replies can play without a fresh tap on the trusted WebUI route. Android denies new microphone requests while not resumed and dispatches a proposed `hermes-app-foreground` host signal; current WebUI does not consume it. Stopping existing capture/playback and requiring explicit re-arm depend on WebUI support (tracked in [#120](https://github.com/hermes-webui/hermes-android/pull/120)).
 - OAuth/OIDC callback handling that keeps trusted sign-in flows in-app until the declared Hermes callback returns
-- Reverse-proxy sign-in redirects (such as Authelia) can continue in-app after you confirm the server and login origins; `/api/status` does not need to be exposed outside proxy authentication
+- WebView passkey integration uses the same AndroidX Credential Manager dependency across app variants, without a Google Play Services adapter in any build. End-to-end availability remains unverified and depends on the installed Android/WebView and credential provider; omitting the optional adapter may limit compatibility on older devices. The identity-provider's sign-in domain must also publish Digital Asset Links for the exact app package and signing certificate. Some providers, including Pocket ID, may reject Android-app WebAuthn origins even with that association.
+- Reverse-proxy sign-in redirects (such as Authelia) can continue in-app after you confirm the server and login origins; `/api/status` does not need to be exposed outside proxy authentication. If that sign-in gateway (for example TinyAuth) starts its own OAuth/OIDC sign-in whose callback returns to the same gateway, the identity-provider pages also stay in the app so the gateway keeps its sign-in cookie.
+- Optional **Settings → Connection → Sign in with Chrome** (off by default) opens OAuth/OIDC sign-in pages in a Chrome Auth Tab, where browser passkeys work, and returns the callback to the app. It needs Chrome 137 or newer, an `https://` callback, and the callback host (Hermes for Hermes sign-in, or the sign-in gateway such as `auth.example.com`) must publish `/.well-known/assetlinks.json` for this app. **Copy assetlinks.json** in that setting copies the file for the exact build you have installed; Play, GitHub, F-Droid and debug builds each need their own entry. If Chrome is missing, too old, or the callback is `http://`, sign-in stays in the app. If Chrome cannot verify the app, you can **Continue in app** instead.
+- Proxy-level HTTP Basic challenges on the configured server show a native username/password prompt with the password masked. The app no longer saves sign-ins from this prompt or automatically supplies previously remembered sign-ins. WebView may reuse an entered sign-in in memory for the same origin. Credentials embedded in a saved server URL remain part of that URL and may be sent automatically. Edit the URL to remove them, and also check the server name: leaving the name blank when adding a server copies the full URL into it, so it may need editing too. Startup, reconnect, notification taps and workspace recovery reject old routes with different URL credentials; Back skips entries with those credentials on the server host. Main-frame requests exposing outdated URL credentials for a selected or previously selected server in the current activity are blocked, including POST and popup handoffs. If history contains outdated credentials when the server changes, the app clears that history. This is not a sign-out and does not clear WebView's authentication cache. Data from the former Remember setting is inactive and can be deleted under **Settings → Connection → Forget saved sign-ins**; this does not change server URLs or names. Basic-auth challenges from other hosts are rejected.
+- Delayed WebView callbacks during a server change can still affect the displayed route or error state when their URL credentials are unchanged or absent. The app keeps the existing WebView rather than resetting it to separate those callbacks; navigation can still discard page state. This limitation remains tracked in [#184](https://github.com/hermes-webui/hermes-android/issues/184).
 
 ### Real Android integration
 
@@ -551,13 +561,15 @@ pending:
   tag and signs it with its own key. After inclusion, no extra release step is
   needed.
 
-Only the Play build contains Google Play libraries (Play Core in-app updates).
-The GitHub and F-Droid builds contain no Google Play or Firebase code.
+Only the Play build contains Google Play/Play Services libraries (Play Core
+in-app updates). Every build uses the same AndroidX Credential Manager
+dependency, without the optional Play Services adapter; GitHub and F-Droid
+builds contain no Google Play or Firebase code.
 
 Current checked-in release metadata:
 
-- Version name: `1.2.1`
-- Version code: `10201`
+- Version name: `1.3.2`
+- Version code: `10302`
 - Play application ID: `com.hermeswebui.android`
 - GitHub application ID: `com.hermeswebui.android.github`
 - F-Droid application ID: `com.hermeswebui.android.fdroid`

@@ -37,6 +37,17 @@ class WebViewSecurityContractTest {
     }
 
     @Test
+    fun `the hosted webview is attached match_parent so viewport units are not zero`() {
+        // Issue #184: a null/WRAP_CONTENT layout height makes Chromium lay out the main frame at
+        // zero height, so vh/dvh/svh/lvh and html{height:100%} all resolve to 0.
+        val shell = codeOnly.entries.single { it.key.endsWith("ui/web/WebShell.kt") }.value
+        val factory = shell.substringAfter("AndroidView(").substringBefore("PullRefreshIndicator")
+        assertThat(factory).contains("layoutParams")
+        assertThat(factory).contains("MATCH_PARENT")
+        assertThat(factory).doesNotContain("WRAP_CONTENT")
+    }
+
+    @Test
     fun `ssl errors are always cancelled and never proceeded`() {
         val overrides = codeOnly.flatMap { (path, text) ->
             bodiesOf(text, "override fun onReceivedSslError(").map { path to it }
@@ -87,6 +98,50 @@ class WebViewSecurityContractTest {
     }
 
     @Test
+    fun `main and popup WebViews handle HTTP authentication through the trusted-host prompt`() {
+        val mainActivity = codeOnly.entries.single { it.key.endsWith("/MainActivity.kt") }.value
+        assertThat(Regex("""override fun onReceivedHttpAuthRequest\(""").findAll(mainActivity).count())
+            .isEqualTo(2)
+        assertThat(Regex("""showHttpAuthPrompt\(handler, host, realm\)""").findAll(mainActivity).count())
+            .isEqualTo(2)
+        val popupFactory = bodiesOf(mainActivity, "private fun createPopupWindow(").single()
+        assertThat(popupFactory).contains("webViewClient = buildPopupWebViewClient(this)")
+        val popupClient = bodiesOf(mainActivity, "private fun buildPopupWebViewClient(").single()
+        assertThat(popupClient).contains("override fun onReceivedHttpAuthRequest(")
+        assertThat(popupClient).contains("showHttpAuthPrompt(handler, host, realm)")
+        val prompt = bodiesOf(mainActivity, "private fun showHttpAuthPrompt(").single()
+        assertThat(prompt).contains("if (!currentWebTrustPolicy().isTrustedHttpAuthHost(host)) {")
+        val untrusted = bodiesOf(prompt, "if (!currentWebTrustPolicy().isTrustedHttpAuthHost(host))").single()
+        assertThat(untrusted).contains("handler.cancel()")
+        assertThat(untrusted).contains("return")
+        assertThat(untrusted.indexOf("handler.cancel()")).isLessThan(untrusted.indexOf("return"))
+        assertThat(prompt.indexOf("isTrustedHttpAuthHost(host)"))
+            .isLessThan(prompt.indexOf("PendingHttpAuthPrompt(handler)"))
+        assertThat(prompt).doesNotContain("handler.proceed(")
+        assertThat(prompt).contains("setOnClickListener")
+        assertThat(prompt.indexOf("setOnClickListener"))
+            .isLessThan(prompt.indexOf("proceedHttpAuthPrompt(prompt, enteredUsername, enteredPassword)"))
+        listOf(
+            "getHttpAuthCredential(",
+            "saveHttpAuthCredential(",
+            "useHttpAuthUsernamePassword(",
+            "getHttpAuthUsernamePassword(",
+            "setHttpAuthUsernamePassword("
+        ).forEach { forbidden ->
+            codeOnly.forEach { (path, text) ->
+                assertWithMessage("$path must not use $forbidden").that(text).doesNotContain(forbidden)
+            }
+        }
+        val proceed = bodiesOf(mainActivity, "private fun proceedHttpAuthPrompt(").single()
+        assertThat(proceed).contains("prompt.handler.proceed(username, password)")
+        val cancel = bodiesOf(mainActivity, "private fun cancelHttpAuthPrompt(").single()
+        assertThat(cancel).contains("prompt.handler.cancel()")
+        val destroy = bodiesOf(mainActivity, "override fun onDestroy()").single()
+        assertThat(destroy).contains("cancelHttpAuthPrompt(prompt)")
+        assertThat(destroy).contains("prompt.dialog?.dismiss()")
+    }
+
+    @Test
     fun `clipboard and image input stay on scoped message bridges with no javascript interface`() {
         // Issue #180: the clipboard fallback must use the trust-checked WebMessageListener, never
         // addJavascriptInterface, and image input must be advertised only for the configured route.
@@ -126,6 +181,28 @@ class WebViewSecurityContractTest {
         val switchAt = switchBody.indexOf("viewModel.switchServerProfile(")
         assertThat(wipeAt).isAtLeast(0)
         assertThat(switchAt).isGreaterThan(wipeAt)
+    }
+
+    @Test
+    fun `sign in with chrome launches only a verified auth tab and returns only verified callbacks`() {
+        // Issue #184: an unsupported browser silently opens a plain Custom Tab that can never return
+        // the callback, so Auth Tab support is checked and the browser pinned before launching.
+        val mainActivity = codeOnly.entries.single { it.key.endsWith("MainActivity.kt") }.value
+        val launch = bodiesOf(mainActivity, "private fun launchBrowserSignIn(").single()
+        val launchAt = launch.indexOf("authTab.launch(")
+        listOf(
+            "isBrowserSignInEnabled()",
+            "BrowserSignIn.authTabCallback(",
+            "CustomTabsClient.isAuthTabSupported(",
+            "intent.setPackage(browserPackage)"
+        ).forEach { guard ->
+            assertWithMessage("launchBrowserSignIn guard $guard").that(launch.indexOf(guard)).isAtLeast(0)
+            assertWithMessage("launchBrowserSignIn guard $guard").that(launch.indexOf(guard)).isLessThan(launchAt)
+        }
+        val result = bodiesOf(mainActivity, "private fun onBrowserSignInResult(").single()
+        assertThat(result).contains("isBrowserSignInStillTrusted(pending)")
+        assertThat(result).contains("pending.flow.isVerifiedCallbackUrl(callbackUrl)")
+        assertThat(manifest).contains("android.support.customtabs.action.CustomTabsService")
     }
 
     @Test

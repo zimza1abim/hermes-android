@@ -326,12 +326,69 @@ object HermesWebUiScripts {
             el.removeAttribute(REPAIRED_ATTR);
           }
 
+          function occupiesFlowSpace(el) {
+            if (!el.getBoundingClientRect || el.getBoundingClientRect().height <= 1) return false;
+            try {
+              var position = window.getComputedStyle(el).position;
+              if (position === 'fixed' || position === 'absolute') return false;
+            } catch (e) {}
+            return true;
+          }
+
+          function hasInFlowChild(el) {
+            for (var child = el.firstElementChild; child; child = child.nextElementSibling) {
+              try {
+                var childStyle = window.getComputedStyle(child);
+                if (childStyle.display === 'none') continue;
+                if (childStyle.position === 'fixed' || childStyle.position === 'absolute') continue;
+                return true;
+              } catch (e) {}
+            }
+            return false;
+          }
+
+          // Issue #190: a page-level app root such as `h-dvh overflow-hidden` collapses
+          // to 0px and clips the entire page, leaving only position:fixed chrome (a
+          // header) visible. Its content usually sits inside a nested clipping wrapper,
+          // so its own scrollHeight cannot reveal what it hides. Recognize it
+          // structurally instead: an in-flow, clipping, zero-height element while
+          // nothing else on the page occupies layout space.
+          function isCollapsedPageShell(el, rect) {
+            if (rect.height > 0) return false;
+            if (!el.firstElementChild) return false;
+            try {
+              var style = window.getComputedStyle(el);
+              if (style.position !== 'static' && style.position !== 'relative') return false;
+              if (style.overflowY === 'visible') return false;
+              if (style.display === 'none' || style.visibility === 'hidden') return false;
+            } catch (e) {
+              return false;
+            }
+            // A container of only fixed/absolute layers (e.g. a modal portal) clips nothing.
+            if (!hasInFlowChild(el)) return false;
+
+            var node = el;
+            while (node.parentElement) {
+              var parent = node.parentElement;
+              for (var sibling = parent.firstElementChild; sibling; sibling = sibling.nextElementSibling) {
+                if (sibling !== node && occupiesFlowSpace(sibling)) return false;
+              }
+              if (parent === document.body) return true;
+              if (parent.getBoundingClientRect().height > 1) return false;
+              node = parent;
+            }
+            return false;
+          }
+
+          // Returns false, 'panel' (generic content-sized repair) or 'shell' (a
+          // collapsed page-level root that should fill the measured viewport).
           function isCollapsedElement(el, viewport) {
             if (!el || !el.getBoundingClientRect) return false;
             if (shouldSkipElement(el)) return false;
 
             var rect = el.getBoundingClientRect();
             var scrollHeight = el.scrollHeight || 0;
+            var pageShell = false;
 
             // Quick filters - skip obviously fine elements
             if (rect.width < 100) return false;
@@ -341,7 +398,8 @@ object HermesWebUiScripts {
               // zero-height elements that hide substantial page-level content, so
               // small spacers and intentionally collapsed widgets are left alone.
               var minShellContent = Math.max(200, Math.round(viewport.height * 0.3));
-              if (scrollHeight < minShellContent) return false;
+              pageShell = isCollapsedPageShell(el, rect);
+              if (scrollHeight < minShellContent && !pageShell) return false;
             } else {
               if (rect.height >= viewport.height * 0.25) return false;
               if (rect.height >= scrollHeight * 0.8) return false;
@@ -355,13 +413,14 @@ object HermesWebUiScripts {
             if (rect.height > collapsedThreshold && !hasOverflowMismatch) return false;
 
             // Skip elements with trivial content
-            if (scrollHeight < 80) return false;
+            if (scrollHeight < 80 && !pageShell) return false;
 
             // Exclusion contract (approval/clarify cards, composer anchors, chat-surface
             // descendants) is evaluated last: it can call getComputedStyle, so only
             // elements that already look collapsed pay for it. The result is identical
             // to evaluating it first because every check here only returns false.
             if (shouldSkipRepairForElement(el)) return false;
+            if (pageShell) return 'shell';
 
             // Check for meaningful interactive content
             var hasInteractive = false;
@@ -378,10 +437,19 @@ object HermesWebUiScripts {
               if (style.display === 'none' || style.visibility === 'hidden') return false;
             } catch (e) {}
 
-            return true;
+            return 'panel';
           }
 
           function updateRepair(el, viewport) {
+            if (el.getAttribute(REPAIRED_ATTR) === 'shell') {
+              // A collapsed page root was meant to fill the viewport (100dvh), not a
+              // content-sized panel; the 82% panel cap would clip its bottom (#190).
+              var shellPx = Math.round(viewport.height) + 'px';
+              if (el.style.height !== shellPx) el.style.height = shellPx;
+              if (el.style.maxHeight !== shellPx) el.style.maxHeight = shellPx;
+              return;
+            }
+
             var maxPanel = Math.max(180, Math.round(viewport.height * 0.82)) + 'px';
             var minPanel = Math.max(100, Math.round(viewport.height * 0.25)) + 'px';
 
@@ -393,11 +461,19 @@ object HermesWebUiScripts {
             // overflow value would corrupt the layout when the repair clears.
           }
 
-          function repairElement(el, viewport) {
+          function repairElement(el, viewport, kind) {
             if (el.getAttribute(REPAIRED_ATTR)) return false;
 
+            el.setAttribute(REPAIRED_ATTR, kind === 'shell' ? 'shell' : 'true');
             updateRepair(el, viewport);
-            el.setAttribute(REPAIRED_ATTR, 'true');
+
+            if (kind === 'shell') {
+              // Descendant panel repairs made while the root was 0px carry the 82%
+              // cap; release them so the next checks re-measure inside the restored
+              // root (later in this same document-order scan).
+              var nested = el.querySelectorAll('[' + REPAIRED_ATTR + ']');
+              for (var n = 0; n < nested.length; n++) clearRepair(nested[n]);
+            }
 
             return true;
           }
@@ -460,8 +536,9 @@ object HermesWebUiScripts {
               }
 
               // Check if element needs repair
-              if (isCollapsedElement(el, viewport)) {
-                if (repairElement(el, viewport)) {
+              var collapseKind = isCollapsedElement(el, viewport);
+              if (collapseKind) {
+                if (repairElement(el, viewport, collapseKind)) {
                   repaired++;
                   if (repaired >= MAX_REPAIRS_PER_SCAN) break;
                 }
@@ -616,9 +693,17 @@ object HermesWebUiScripts {
             return (el.tagName || '').toUpperCase() === 'TEXTAREA' || el.isContentEditable;
           };
 
+          // Only Hermes WebUI gets this shim (bundle marker, or its .layout/main.main DOM
+          // on older builds). The official Webapp and the Hermes Dashboard own their own
+          // editor Enter behavior even when one of them is the configured server (#190).
+          var isHermesWebUiPage = function() {
+            if (window.__HERMES_UI_SURFACE__ === 'webapp') return false;
+            return !!(window.__HERMES_WEBUI_BUNDLE_VERSION__ ||
+              (document.querySelector('.layout') && document.querySelector('main.main')));
+          };
+
           document.addEventListener('keydown', function(e) {
-            // The official React workspace owns editor input and mobile Enter behavior.
-            if (window.__HERMES_UI_SURFACE__ === 'webapp') return;
+            if (!isHermesWebUiPage()) return;
             if (e.key !== 'Enter' && e.keyCode !== 13) return;
             if (e.shiftKey || e.isComposing) return;
             // Hardware keyboard attached: defer to WebUI's native handling so a plain
@@ -651,6 +736,14 @@ object HermesWebUiScripts {
           var markerValue = '1';
           var labelText = 'Application Settings';
           var scheduled = false;
+
+          // The entry belongs in Hermes WebUI's sidebar only; the Webapp and the
+          // Dashboard render their own React-owned navigation (#190).
+          var isHermesWebUiPage = function() {
+            if (window.__HERMES_UI_SURFACE__ === 'webapp') return false;
+            return !!(window.__HERMES_WEBUI_BUNDLE_VERSION__ ||
+              (document.querySelector('.layout') && document.querySelector('main.main')));
+          };
 
           var normalizedText = function(value) {
             return String(value || '').trim().toLowerCase();
@@ -1001,7 +1094,7 @@ object HermesWebUiScripts {
 
           var ensureEntry = function() {
             // Cloning a React-owned settings node would bypass its component state.
-            if (window.__HERMES_UI_SURFACE__ === 'webapp') return;
+            if (!isHermesWebUiPage()) return;
             try {
               if (placementStillVerified()) return;
               verified = null;
@@ -1071,9 +1164,16 @@ object HermesWebUiScripts {
           var FOCUS_INTENT_WINDOW_MS = 1000;
           var PRESENTATION_HANDLED_ATTR = 'data-hermes-android-clarify-focus-handled';
 
+          // Clarify handling is Hermes WebUI-only; never touch Webapp or Dashboard inputs (#190).
+          var isHermesWebUiPage = function() {
+            if (window.__HERMES_UI_SURFACE__ === 'webapp') return false;
+            return !!(window.__HERMES_WEBUI_BUNDLE_VERSION__ ||
+              (document.querySelector('.layout') && document.querySelector('main.main')));
+          };
+
           var isClarifyInput = function(target) {
             return !!(
-              window.__HERMES_UI_SURFACE__ !== 'webapp' &&
+              isHermesWebUiPage() &&
               target &&
               target.id === 'clarifyInput' &&
               target.closest &&
@@ -1099,7 +1199,7 @@ object HermesWebUiScripts {
           };
 
           var rememberClarifyFocusIntent = function(event) {
-            if (window.__HERMES_UI_SURFACE__ === 'webapp') return;
+            if (!isHermesWebUiPage()) return;
             var target = event.target;
             if (!target || !target.closest) return;
             var card = target.closest('.clarify-card.visible');
@@ -1116,7 +1216,7 @@ object HermesWebUiScripts {
           document.addEventListener('touchstart', rememberClarifyFocusIntent, true);
           document.addEventListener('click', rememberClarifyFocusIntent, true);
           document.addEventListener('keydown', function(event) {
-            if (window.__HERMES_UI_SURFACE__ === 'webapp') return;
+            if (!isHermesWebUiPage()) return;
             if (event.key === 'Tab') {
               var card = document.querySelector('.clarify-card.visible');
               if (card) {
@@ -1162,7 +1262,7 @@ object HermesWebUiScripts {
 
           if (window.MutationObserver) {
             var resetCompletedPresentation = function() {
-              if (window.__HERMES_UI_SURFACE__ === 'webapp') return;
+              if (!isHermesWebUiPage()) return;
               var cards = document.querySelectorAll('.clarify-card[' + PRESENTATION_HANDLED_ATTR + ']');
               for (var i = 0; i < cards.length; i++) {
                 var card = cards[i];
@@ -1191,9 +1291,21 @@ object HermesWebUiScripts {
         return """
             (function() {
               try {
+                // Document-start scripts run in insertion order, and some WebView builds still
+                // inject a just-removed copy into the next navigation. Every copy records its
+                // URL so the newest install wins; only the first copy installs the listeners.
+                window.__hermesAndroidRouteRecoveryUrl = $quotedLastUrl;
                 if (window.__hermesAndroidRouteRecoveryInstalled) return;
                 window.__hermesAndroidRouteRecoveryInstalled = true;
-                var recoveryUrl = $quotedLastUrl;
+                window.addEventListener('hermes-android-reset-route-recovery', function() {
+                  window.__hermesAndroidRouteRecoveryUrl = '';
+                });
+                // Workspace-panel recovery targets Hermes WebUI markup only (#190).
+                var isHermesWebUiPage = function() {
+                  if (window.__HERMES_UI_SURFACE__ === 'webapp') return false;
+                  return !!(window.__HERMES_WEBUI_BUNDLE_VERSION__ ||
+                    (document.querySelector('.layout') && document.querySelector('main.main')));
+                };
                 var panelIsHidden = function() {
                   try {
                     var rightPanel = document.querySelector('.rightpanel');
@@ -1250,7 +1362,7 @@ object HermesWebUiScripts {
                 };
                 window.addEventListener('click', function(event) {
                   try {
-                    if (window.__HERMES_UI_SURFACE__ === 'webapp') return;
+                    if (!isHermesWebUiPage()) return;
                     var target = event.target;
                     var button = target && target.closest ? target.closest('#btnWorkspacePanelToggle') : null;
                     if (!button) return;
@@ -1263,10 +1375,12 @@ object HermesWebUiScripts {
                         forcePanelOpen();
                         window.setTimeout(function() {
                           if (!panelIsHidden()) return;
+                          var recoveryUrl = window.__hermesAndroidRouteRecoveryUrl;
                           if (recoveryUrl && window.location && window.location.href !== recoveryUrl) {
                             window.location.href = recoveryUrl;
                           }
                         }, 90);
+                        var recoveryUrl = window.__hermesAndroidRouteRecoveryUrl;
                         if (panelIsHidden() && recoveryUrl && window.location && window.location.href !== recoveryUrl) {
                           window.location.href = recoveryUrl;
                         }
@@ -1276,7 +1390,7 @@ object HermesWebUiScripts {
                 }, true);
                 window.addEventListener('click', function(event) {
                   try {
-                    if (window.__HERMES_UI_SURFACE__ === 'webapp') return;
+                    if (!isHermesWebUiPage()) return;
                     var target = event.target;
                     if (!target || !target.closest) return;
                     var rightPanel = document.querySelector('.rightpanel');
