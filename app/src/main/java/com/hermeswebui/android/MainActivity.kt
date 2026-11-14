@@ -2414,7 +2414,9 @@ class MainActivity : ComponentActivity() {
                 if (offset != null && goBackInMainWebView(offset)) {
                     backPressExitStage = 0
                 } else {
-                    handleExitBackPress(onRequestExit)
+                    // Leave the workspace loaded: the background monitor keeps running either way,
+                    // so finishing would only add a full page load to the next open.
+                    handleExitBackPress { moveTaskToBack(true) }
                 }
             } else {
                 handleWebUiBackNavigation(onRequestExit)
